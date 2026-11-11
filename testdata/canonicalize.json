@@ -1,0 +1,13 @@
+{
+  "platform": "wechat-channels",
+  "note": "contentId 要看分享页接口的回答：有 feed id 用它，没有时是 sph-<短码>。下面只列不发请求就能定的部分。",
+  "cases": [
+    {"input": "https://weixin.qq.com/sph/AbC123_x", "match": true, "shortCode": "AbC123_x", "url": "https://weixin.qq.com/sph/AbC123_x"},
+    {"input": "https://weixin.qq.com/sph/AbC123/", "match": true, "shortCode": "AbC123", "url": "https://weixin.qq.com/sph/AbC123"},
+    {"input": "http://weixin.qq.com/sph/AbC123?from=timeline", "match": true, "shortCode": "AbC123", "url": "https://weixin.qq.com/sph/AbC123"},
+    {"input": "https://channels.weixin.qq.com/finder-preview/pages/sph?id=AbC123&scene=1", "match": true, "shortCode": "AbC123", "url": "https://weixin.qq.com/sph/AbC123"},
+    {"input": "https://channels.weixin.qq.com/finder-preview/pages/feed?id=AbC123", "match": false},
+    {"input": "https://weixin.qq.com/sph/", "match": false},
+    {"input": "https://weixin.qq.com/s/AbC123", "match": false}
+  ]
+}

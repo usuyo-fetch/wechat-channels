@@ -1,0 +1,12 @@
+{
+  "errCode": 0,
+  "errMsg": "",
+  "data": {
+    "feedInfo": {
+      "coverUrl": "{media}/cover.jpg"
+    },
+    "authorInfo": {
+      "nickname": "咖啡日常"
+    }
+  }
+}

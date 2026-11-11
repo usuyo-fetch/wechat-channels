@@ -1,0 +1,19 @@
+{
+  "errCode": 0,
+  "errMsg": "",
+  "data": {
+    "feedInfo": {
+      "description": "手冲咖啡：三段式注水。第一段 40 克闷蒸 30 秒 #咖啡",
+      "coverUrl": "{media}/cover.jpg",
+      "h264VideoInfo": {
+        "videoUrl": "{media}/video.mp4"
+      },
+      "h265VideoInfo": {
+        "videoUrl": "{media}/video-h265.mp4"
+      }
+    },
+    "authorInfo": {
+      "nickname": "咖啡日常"
+    }
+  }
+}

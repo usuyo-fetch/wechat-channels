@@ -1,0 +1,49 @@
+# 微信视频号获取插件（usuyo 插件协议 v1）。设计见 usuyo 仓库 docs/research/15-fetch-design-xhs-sph-bili.md §3。
+protocol: 1
+id: usuyo-fetch/wechat-channels
+kind: fetch
+name: 微信视频号
+description: >-
+  用手机上「分享 → 复制链接」得到的视频号链接取一条，用于个人备份、离线阅读。
+  不登录时只存作者、描述和封面；登录了腾讯元宝，才会用你的元宝账号换一个临时凭证去取视频文件。
+version: 0.1.0
+license: MIT
+maintainers: [Fldicoahkiin]
+upstream:
+  - name: ParseHub（移植 provider_api/wxchannels.py 的请求和解析）
+    url: https://github.com/z-mio/ParseHub
+    license: MIT
+platforms: [wechat-channels]
+match: ["weixin.qq.com/sph/*", "channels.weixin.qq.com/finder-preview/pages/*"]
+access: session-api
+login: optional
+sites:
+  - site: yuanbao.tencent.com
+    name: 腾讯元宝
+    credential: cookies
+    loginUrl: https://yuanbao.tencent.com/
+    # 登录后才有的 cookie 名还没核实，所以先不写 `cookies`
+capabilities:
+  fetch:
+    # 不登录：匿名读分享页的接口（public-web），只有作者、描述、封面。
+    # 登录了元宝：用你的元宝 cookie 换临时凭证再取视频地址（session-api），只有这一步用到元宝账号。
+    access: session-api
+    login: optional
+    sites: [yuanbao.tencent.com]
+    timeout: 30m
+    outputs: [text, images, media:video, meta]
+pacing:
+  wechat-channels: {batch: true, interval: 30s, daily: 50}
+permissions:
+  fs:
+    write: ["${OUT}"]
+  network:
+    mode: allowlist
+    # 视频和封面所在的 CDN 主机名没有核实，先放行 *.qq.com；插件自己也只从 *.qq.com 的 https 地址下载
+    hosts: ["channels.weixin.qq.com", "yuanbao.tencent.com", "*.qq.com"]
+  env: []
+  devices: []
+  gpu: false
+  limits: {memory: 512MiB}
+run:
+  command: ["${PLUGIN_DIR}/usuyo-fetch-wechat-channels"]

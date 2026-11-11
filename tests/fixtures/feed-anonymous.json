@@ -1,0 +1,16 @@
+{
+  "errCode": 0,
+  "errMsg": "",
+  "data": {
+    "feedInfo": {
+      "exportId": "export/UzFfFixtureExportId0001",
+      "description": "手冲咖啡：三段式注水。第一段 40 克闷蒸 30 秒 #咖啡",
+      "coverUrl": "{media}/cover.jpg",
+      "likeCount": 12,
+      "forwardCount": 3
+    },
+    "authorInfo": {
+      "nickname": "咖啡日常"
+    }
+  }
+}
