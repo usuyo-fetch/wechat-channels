@@ -16,7 +16,8 @@ use crate::{Config, MEDIA_REDIRECTS, media_client};
 
 const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
-/// 检查下载地址：协议、主机都要在名单里。
+/// 检查下载地址：协议、主机都要在名单里，正式运行时只走 https 的默认端口。
+/// 跳转的每一跳也经这里查，见 [`get_media`]。
 fn media_url(cfg: &Config, raw: &str) -> Result<url::Url, String> {
     let url = url::Url::parse(raw).map_err(|_| "平台给的下载地址不是链接".to_owned())?;
     let scheme_ok = match url.scheme() {
@@ -33,23 +34,51 @@ fn media_url(cfg: &Config, raw: &str) -> Result<url::Url, String> {
     if !scheme_ok {
         return Err(format!("平台给的下载地址不是 https（{}）", url.scheme()));
     }
+    if let Some(port) = url.port().filter(|_| cfg.endpoints.media_https_only) {
+        return Err(format!("平台给的下载地址带了端口（{port}）"));
+    }
     if !host_ok {
         return Err(format!("平台给的下载地址不在允许的主机里（{host}）"));
     }
     Ok(url)
 }
 
+/// 发一个下载请求，跳转由这里一跳一跳地跟：每一跳的去处都先过 [`media_url`]，
+/// CDN 不能把下载降到明文 http、换到别的端口。`timeout` 管连同跳转的总时长。
+fn get_media(
+    cfg: &Config,
+    mut url: url::Url,
+    accept: &str,
+    timeout: Duration,
+    what: &str,
+) -> Result<http::Response, String> {
+    let client = media_client(cfg);
+    let deadline = Instant::now() + timeout;
+    for _ in 0..=MEDIA_REDIRECTS {
+        let response = client
+            .get(&url)
+            .header("Accept", accept)
+            .timeout(deadline.saturating_duration_since(Instant::now()))
+            .send()
+            .map_err(|e| format!("{what}下载失败：{e}"))?;
+        let status = response.status();
+        if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+            return Ok(response);
+        }
+        let next = response
+            .header("location")
+            .and_then(|l| url.join(l).ok())
+            .ok_or_else(|| format!("{what}下载失败：HTTP {status} 没有可用的跳转地址"))?;
+        url = media_url(cfg, next.as_str()).map_err(|why| format!("{what}下载失败：{why}"))?;
+    }
+    Err(format!("{what}下载失败：跳转超过 {MEDIA_REDIRECTS} 次"))
+}
+
 /// 下载封面，按文件头认出 jpg、png、webp、gif；返回内容和扩展名。
 pub fn cover(cfg: &Config, raw_url: &str) -> Result<(Vec<u8>, &'static str), String> {
     let url = media_url(cfg, raw_url)?;
     let limit = cfg.limits.cover_bytes;
-    let mut response = media_client(cfg)
-        .get(&url)
-        .header("Accept", "image/*")
-        .timeout(cfg.limits.cover_timeout)
-        .follow_redirects(MEDIA_REDIRECTS)
-        .send()
-        .map_err(|e| format!("封面下载失败：{e}"))?;
+    let mut response = get_media(cfg, url, "image/*", cfg.limits.cover_timeout, "封面")?;
     let status = response.status();
     if !(200..=299).contains(&status) {
         return Err(format!("封面下载失败：HTTP {status}"));
@@ -90,7 +119,7 @@ pub fn video(cfg: &Config, raw_url: &str, dest: &Path) -> Result<u64, String> {
     let received = Arc::new(AtomicU64::new(0));
     let expected = Arc::new(AtomicU64::new(0));
     let (tx, rx) = mpsc::channel();
-    let client = media_client(cfg);
+    let thread_cfg = cfg.clone();
     let timeout = limits.video_timeout;
     let cap = limits.video_bytes;
     {
@@ -98,13 +127,8 @@ pub fn video(cfg: &Config, raw_url: &str, dest: &Path) -> Result<u64, String> {
         let expected = Arc::clone(&expected);
         std::thread::spawn(move || {
             let result = (|| -> Result<u64, String> {
-                let response = client
-                    .get(&url)
-                    .header("Accept", "video/mp4,video/*;q=0.9,*/*;q=0.5")
-                    .timeout(timeout)
-                    .follow_redirects(MEDIA_REDIRECTS)
-                    .send()
-                    .map_err(|e| format!("视频下载失败：{e}"))?;
+                let accept = "video/mp4,video/*;q=0.9,*/*;q=0.5";
+                let response = get_media(&thread_cfg, url, accept, timeout, "视频")?;
                 let status = response.status();
                 if !(200..=299).contains(&status) {
                     return Err(format!("视频下载失败：HTTP {status}"));
@@ -120,6 +144,7 @@ pub fn video(cfg: &Config, raw_url: &str, dest: &Path) -> Result<u64, String> {
                 let mut reader = response.into_reader(cap);
                 let mut buf = vec![0u8; 256 << 10];
                 let mut total = 0u64;
+                let mut head = Vec::with_capacity(12);
                 loop {
                     let n = match reader.read(&mut buf) {
                         Ok(0) => break,
@@ -130,12 +155,22 @@ pub fn video(cfg: &Config, raw_url: &str, dest: &Path) -> Result<u64, String> {
                         }
                         Err(e) => return Err(format!("视频下载中断：{e}")),
                     };
+                    // 头 12 个字节一到就认格式，不是 MP4 不往下载
+                    if head.len() < 12 {
+                        head.extend(buf[..n].iter().take(12 - head.len()));
+                        if head.len() == 12 && !is_mp4(&head) {
+                            return Err(NOT_MP4.into());
+                        }
+                    }
                     file.write_all(&buf[..n])
                         .map_err(|e| format!("写临时文件失败：{e}"))?;
                     total += n as u64;
                     received.store(total, Ordering::Relaxed);
                 }
                 file.flush().map_err(|e| format!("写临时文件失败：{e}"))?;
+                if head.len() < 12 {
+                    return Err(NOT_MP4.into());
+                }
                 Ok(total)
             })();
             // 主线程可能已经放弃这一段，收不到也没关系
@@ -175,17 +210,6 @@ pub fn video(cfg: &Config, raw_url: &str, dest: &Path) -> Result<u64, String> {
         }
     };
 
-    let mut head = [0u8; 12];
-    let mut check = part
-        .reopen()
-        .map_err(|e| format!("打开临时文件失败：{e}"))?;
-    let read = check
-        .read(&mut head)
-        .map_err(|e| format!("读临时文件失败：{e}"))?;
-    // MP4 的第一个 box 是 `ftyp`：第 4 到 8 字节
-    if read < 12 || &head[4..8] != b"ftyp" {
-        return Err("视频地址给出的不是能直接播放的 MP4 文件".into());
-    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("建 media/ 失败：{e}"))?;
     }
@@ -194,6 +218,13 @@ pub fn video(cfg: &Config, raw_url: &str, dest: &Path) -> Result<u64, String> {
         std::fs::copy(e.file.path(), dest).map_err(|e| format!("写视频文件失败：{e}"))?;
     }
     Ok(total)
+}
+
+const NOT_MP4: &str = "视频地址给出的不是能直接播放的 MP4 文件";
+
+/// MP4 的第一个 box 是 `ftyp`：第 4 到 8 字节。
+fn is_mp4(head: &[u8]) -> bool {
+    head.get(4..8) == Some(b"ftyp")
 }
 
 fn progress(done: u64, total: u64) {
@@ -228,5 +259,7 @@ mod tests {
         assert!(media_url(&cfg, "https://qq.com.example/x").is_err());
         assert!(media_url(&cfg, "https://127.0.0.1/x").is_err());
         assert!(media_url(&cfg, "file:///etc/passwd").is_err());
+        assert!(media_url(&cfg, "https://finder.video.qq.com:8443/x").is_err());
+        assert!(media_url(&cfg, "https://finder.video.qq.com:443/x").is_ok());
     }
 }

@@ -41,7 +41,7 @@ pub struct Endpoints {
     pub yuanbao: url::Url,
     /// 封面和视频只从这些主机下载（等于它或是它的子域）。
     pub media_hosts: Vec<String>,
-    /// 下载地址只接受 https。
+    /// 下载地址（连同跳转的每一跳）只接受 https 的默认端口。
     pub media_https_only: bool,
 }
 

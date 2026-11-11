@@ -534,6 +534,24 @@ fn stalled_video_gives_up_and_keeps_the_rest() {
 }
 
 #[test]
+fn non_mp4_video_is_refused_on_the_first_bytes() {
+    // 头几个字节就不是 MP4，后面卡住不发：不等下完，也不等卡住超时
+    let w = Setup {
+        video: Arc::new(|_| Reply {
+            stall_after: Some(64),
+            ..Reply::bytes("video/mp4", b"\x00\x01encrypted-or-html".repeat(10))
+        }),
+        ..Setup::default()
+    }
+    .start();
+    let out = w.fetch(None, Some(&cookies())).unwrap();
+    assert_eq!(out.missing, [OutputKind::Video]);
+    let reason = out.missing_reason.unwrap();
+    assert!(reason.contains("不是能直接播放的 MP4"), "{reason}");
+    assert!(!w.files().iter().any(|f| f.starts_with("media/")));
+}
+
+#[test]
 fn malformed_answers_are_upstream_changed() {
     let bodies = [
         "not json".to_owned(),
@@ -718,9 +736,10 @@ fn media_redirects_cannot_leave_the_host_list() {
     let other = Server::start(|_| Reply::bytes("video/mp4", mp4()));
     let port = other.base.rsplit(':').next().unwrap().to_owned();
     let cases = [
+        // 每一跳都由插件自己按下载地址的规则查：没连之前就拒
         (
             format!("http://localhost:{port}/video.mp4"),
-            "not on the plugin's host list",
+            "不在允许的主机里",
         ),
         (
             format!("http://loop.test:{port}/video.mp4"),
