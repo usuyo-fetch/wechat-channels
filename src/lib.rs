@@ -85,7 +85,7 @@ impl Config {
                 video_bytes: 2 << 30,
                 video_stall: Duration::from_secs(60),
             },
-            policy: Policy::strict(),
+            policy: Policy::from_host(),
         }
     }
 }
