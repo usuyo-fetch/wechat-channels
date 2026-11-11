@@ -149,6 +149,7 @@ pub fn fetch(
                 mime: Some("video/mp4".into()),
                 lang: None,
                 duration_sec: None,
+                group: None,
             }),
             Err(why) => {
                 eprintln!("video download skipped: {why}");
