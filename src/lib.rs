@@ -18,7 +18,8 @@ mod yuanbao;
 
 use std::time::Duration;
 
-use usuyo_plugin::protocol::{Canonicalized, Identity, PlatformId};
+use usuyo_plugin_kit::http::{self, Client, Hosts, Policy};
+use usuyo_plugin_kit::protocol::{Canonicalized, Identity, PlatformId};
 
 pub use error::FetchError;
 
@@ -28,6 +29,8 @@ pub const YUANBAO_SITE: &str = "yuanbao.tencent.com";
 
 /// 普通桌面浏览器的 UA，和 ParseHub 一样不带别的指纹头。
 const USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36";
+/// 封面和视频的 CDN 可能跳转，最多跟几次；每一跳都要在 `media_hosts` 里、是公网地址。
+const MEDIA_REDIRECTS: u32 = 5;
 
 /// 请求发到哪里。正式运行只用 [`Config::production`]；别的值只在测试里出现。
 #[derive(Debug, Clone)]
@@ -60,6 +63,8 @@ pub struct Limits {
 pub struct Config {
     pub endpoints: Endpoints,
     pub limits: Limits,
+    /// 地址策略。正式运行是 [`Policy::strict`]；测试换成让本机测试服务算公网的值。
+    pub policy: Policy,
 }
 
 impl Config {
@@ -80,6 +85,7 @@ impl Config {
                 video_bytes: 2 << 30,
                 video_stall: Duration::from_secs(60),
             },
+            policy: Policy::strict(),
         }
     }
 }
@@ -110,56 +116,34 @@ pub fn canonicalize(cfg: &Config, input: &str) -> Result<Canonicalized, FetchErr
     })
 }
 
-/// 接口用的客户端：不跟重定向，免得 cookie 头跟着跳到别的主机。
-fn api_agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .max_redirects(0)
-        .user_agent(USER_AGENT)
-        .http_status_as_error(false)
-        .build()
-        .into()
+/// 只连 `base` 这一台主机的客户端。接口的请求都不跟重定向，免得 cookie 头跟着跳到别的主机。
+fn api_client(cfg: &Config, base: &url::Url) -> Client {
+    let host = base.host_str().unwrap_or_default();
+    Client::new(USER_AGENT, Hosts::only([host])).with_policy(cfg.policy)
 }
 
-/// 下载封面和视频用的客户端：CDN 可能跳转，请求里不带任何凭据。
-fn media_agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(timeout))
-        .timeout_connect(Some(Duration::from_secs(15)))
-        .max_redirects(5)
-        .user_agent(USER_AGENT)
-        .http_status_as_error(false)
-        .build()
-        .into()
+/// 下载封面和视频用的客户端：只连 `media_hosts` 和它们的子域，请求里不带任何凭据。
+fn media_client(cfg: &Config) -> Client {
+    let hosts = cfg
+        .endpoints
+        .media_hosts
+        .iter()
+        .flat_map(|h| [h.clone(), format!(".{h}")]);
+    Client::new(USER_AGENT, Hosts::only(hosts)).with_policy(cfg.policy)
 }
 
 /// 读完一个接口回答，超过上限算接口改了。
-fn read_body(
-    response: &mut ureq::http::Response<ureq::Body>,
-    limit: u64,
-) -> Result<Vec<u8>, FetchError> {
-    response
-        .body_mut()
-        .with_config()
-        .limit(limit)
-        .read_to_vec()
-        .map_err(|e| match e {
-            ureq::Error::BodyExceedsLimit(_) => {
-                FetchError::UpstreamChanged(format!("response is larger than {limit} bytes"))
-            }
-            other => FetchError::Network(other.to_string()),
-        })
+fn read_body(response: &mut http::Response, limit: u64) -> Result<Vec<u8>, FetchError> {
+    response.read_to_vec(limit).map_err(|e| match e {
+        http::Error::TooLarge(_) => {
+            FetchError::UpstreamChanged(format!("response is larger than {limit} bytes"))
+        }
+        other => FetchError::Network(other.to_string()),
+    })
 }
 
-fn retry_after(response: &ureq::http::Response<ureq::Body>) -> Option<u64> {
-    response
-        .headers()
-        .get("retry-after")?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+fn retry_after(response: &http::Response) -> Option<u64> {
+    response.header("retry-after")?.trim().parse().ok()
 }
 
 /// 给用户看的一小段平台文字：去掉标签、控制字符，截短。

@@ -711,3 +711,40 @@ fn video_and_cover_failures_without_login_stay_partial() {
     let out = w.fetch(None, None).unwrap();
     assert_eq!(out.missing, [OutputKind::Images, OutputKind::Video]);
 }
+
+#[test]
+fn media_redirects_cannot_leave_the_host_list() {
+    // 视频地址在名单里，CDN 跳去名单外的主机、跳去名单里但解析成回环的主机：都不连
+    let other = Server::start(|_| Reply::bytes("video/mp4", mp4()));
+    let port = other.base.rsplit(':').next().unwrap().to_owned();
+    let cases = [
+        (
+            format!("http://localhost:{port}/video.mp4"),
+            "not on the plugin's host list",
+        ),
+        (
+            format!("http://loop.test:{port}/video.mp4"),
+            "not a public address",
+        ),
+    ];
+    for (location, why) in cases {
+        let w = Setup {
+            video: Arc::new(move |_| Reply {
+                status: 302,
+                location: Some(location.clone()),
+                ..Reply::json(302, "")
+            }),
+            ..Setup::default()
+        }
+        .start();
+        let out = w.fetch(None, Some(&cookies())).unwrap();
+        assert_eq!(out.missing, [OutputKind::Video], "{why}");
+        let reason = out.missing_reason.unwrap();
+        assert!(
+            reason.contains("视频下载失败") && reason.contains(why),
+            "{reason}"
+        );
+        assert!(!w.files().iter().any(|f| f.starts_with("media/")));
+    }
+    assert!(other.requests().is_empty(), "{:?}", other.requests());
+}

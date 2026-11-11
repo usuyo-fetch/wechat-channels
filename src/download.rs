@@ -1,5 +1,5 @@
 //! 下载封面和视频。地址来自平台的回答，不可信：只接受 [`crate::Endpoints`] 里列出的主机，
-//! 有大小和时长上限，按文件头认格式。失败只返回给用户看的原因，由调用方记成缺的那一项。
+//! CDN 跳转的每一跳也一样，有大小和时长上限，按文件头认格式。失败只返回给用户看的原因，由调用方记成缺的那一项。
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -8,9 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use usuyo_plugin::protocol::PluginEvent;
+use usuyo_plugin_kit::protocol::PluginEvent;
 
-use crate::{Config, media_agent};
+use usuyo_plugin_kit::http;
+
+use crate::{Config, MEDIA_REDIRECTS, media_client};
 
 const PROGRESS_EVERY: Duration = Duration::from_secs(30);
 
@@ -41,24 +43,21 @@ fn media_url(cfg: &Config, raw: &str) -> Result<url::Url, String> {
 pub fn cover(cfg: &Config, raw_url: &str) -> Result<(Vec<u8>, &'static str), String> {
     let url = media_url(cfg, raw_url)?;
     let limit = cfg.limits.cover_bytes;
-    let mut response = media_agent(cfg.limits.cover_timeout)
-        .get(url.as_str())
+    let mut response = media_client(cfg)
+        .get(&url)
         .header("Accept", "image/*")
-        .call()
+        .timeout(cfg.limits.cover_timeout)
+        .follow_redirects(MEDIA_REDIRECTS)
+        .send()
         .map_err(|e| format!("封面下载失败：{e}"))?;
-    let status = response.status().as_u16();
+    let status = response.status();
     if !(200..=299).contains(&status) {
         return Err(format!("封面下载失败：HTTP {status}"));
     }
-    let bytes = response
-        .body_mut()
-        .with_config()
-        .limit(limit)
-        .read_to_vec()
-        .map_err(|e| match e {
-            ureq::Error::BodyExceedsLimit(_) => format!("封面超过 {} MiB", limit >> 20),
-            other => format!("封面下载失败：{other}"),
-        })?;
+    let bytes = response.read_to_vec(limit).map_err(|e| match e {
+        http::Error::TooLarge(_) => format!("封面超过 {} MiB", limit >> 20),
+        other => format!("封面下载失败：{other}"),
+    })?;
     let ext = image_kind(&bytes).ok_or_else(|| "封面地址给出的不是图片".to_owned())?;
     Ok((bytes, ext))
 }
@@ -91,33 +90,34 @@ pub fn video(cfg: &Config, raw_url: &str, dest: &Path) -> Result<u64, String> {
     let received = Arc::new(AtomicU64::new(0));
     let expected = Arc::new(AtomicU64::new(0));
     let (tx, rx) = mpsc::channel();
-    let agent = media_agent(limits.video_timeout);
+    let client = media_client(cfg);
+    let timeout = limits.video_timeout;
     let cap = limits.video_bytes;
     {
         let received = Arc::clone(&received);
         let expected = Arc::clone(&expected);
         std::thread::spawn(move || {
             let result = (|| -> Result<u64, String> {
-                let response = agent
-                    .get(url.as_str())
+                let response = client
+                    .get(&url)
                     .header("Accept", "video/mp4,video/*;q=0.9,*/*;q=0.5")
-                    .call()
+                    .timeout(timeout)
+                    .follow_redirects(MEDIA_REDIRECTS)
+                    .send()
                     .map_err(|e| format!("视频下载失败：{e}"))?;
-                let status = response.status().as_u16();
+                let status = response.status();
                 if !(200..=299).contains(&status) {
                     return Err(format!("视频下载失败：HTTP {status}"));
                 }
                 let length = response
-                    .headers()
-                    .get("content-length")
-                    .and_then(|v| v.to_str().ok())
+                    .header("content-length")
                     .and_then(|v| v.parse::<u64>().ok());
                 if length.is_some_and(|n| n > cap) {
                     return Err(format!("视频超过 {} MiB", cap >> 20));
                 }
                 expected.store(length.unwrap_or(0), Ordering::Relaxed);
-                // 上限自己数：Content-Length 可能没有，也可能不实
-                let mut reader = response.into_body().into_with_config().reader();
+                // Content-Length 可能没有，也可能不实：读的时候按上限截住
+                let mut reader = response.into_reader(cap);
                 let mut buf = vec![0u8; 256 << 10];
                 let mut total = 0u64;
                 loop {
@@ -125,11 +125,11 @@ pub fn video(cfg: &Config, raw_url: &str, dest: &Path) -> Result<u64, String> {
                         Ok(0) => break,
                         Ok(n) => n,
                         Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                        Err(e) if e.kind() == std::io::ErrorKind::FileTooLarge => {
+                            return Err(format!("视频超过 {} MiB", cap >> 20));
+                        }
                         Err(e) => return Err(format!("视频下载中断：{e}")),
                     };
-                    if total + n as u64 > cap {
-                        return Err(format!("视频超过 {} MiB", cap >> 20));
-                    }
                     file.write_all(&buf[..n])
                         .map_err(|e| format!("写临时文件失败：{e}"))?;
                     total += n as u64;

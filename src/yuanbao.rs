@@ -30,11 +30,12 @@
 //! 已经拿到的作者、描述、封面照样交回（协议 §3.1「拿到一部分就回 partial」）；不跟重定向。
 
 use serde_json::{Value, json};
+use usuyo_plugin_kit::http::Cookie;
 
 use crate::credentials::YuanbaoCookies;
 use crate::feed::{self, FeedFields, Rejected, opt_str};
 use crate::{
-    Config, FetchError, YUANBAO_SITE, api_agent, link, plain_snippet, read_body, retry_after,
+    Config, FetchError, YUANBAO_SITE, api_client, link, plain_snippet, read_body, retry_after,
 };
 
 const PARSE_API: &str = "/api/weixin/get_parse_result";
@@ -134,22 +135,26 @@ pub fn exchange(
 /// 带 token 调分享页的接口，拿视频地址。不带任何 cookie。
 pub fn video_feed(cfg: &Config, ex: &Exchange) -> Result<VideoFeed, VideoError> {
     let base = &cfg.endpoints.channels;
-    let mut response = api_agent(cfg.limits.api_timeout)
-        .post(feed::api_url(cfg).as_str())
-        .query("_rid", feed::rid())
-        .query(
+    let mut url = feed::api_url(cfg);
+    url.query_pairs_mut()
+        .append_pair("_rid", &feed::rid())
+        .append_pair(
             "_pageUrl",
-            feed::page_url(cfg, "/finder-preview/pages/feed"),
-        )
+            &feed::page_url(cfg, "/finder-preview/pages/feed"),
+        );
+    let body = json!({"baseReq": {"generalToken": ex.token}, "exportId": ex.export_id});
+    let mut response = api_client(cfg, base)
+        .post(&url, body.to_string())
         .header("Content-Type", "application/json")
-        .header("Origin", feed::origin(base))
+        .header("Origin", &feed::origin(base))
         .header("Referer", &ex.playable_url)
-        .send(json!({"baseReq": {"generalToken": ex.token}, "exportId": ex.export_id}).to_string())
+        .timeout(cfg.limits.api_timeout)
+        .send()
         .map_err(|e| {
             eprintln!("feed request with token failed: {e}");
             VideoError::Missed("带临时凭证调视频号接口时连不上，这次没有取视频".into())
         })?;
-    let status = response.status().as_u16();
+    let status = response.status();
     match status {
         200..=299 => {}
         429 => {
@@ -234,15 +239,19 @@ fn call_parse(
     url.set_path(PARSE_API);
     let mut referer = base.clone();
     referer.set_path("/");
-    let mut response = api_agent(cfg.limits.api_timeout)
-        .post(url.as_str())
+    // cookie 只给元宝这一台主机；不跟重定向
+    let cookie = Cookie::new(cookies.header(), [base.host_str().unwrap_or_default()]);
+    let body = json!({"type": "video_channel_url", "url": share_url, "scene": 1});
+    let mut response = api_client(cfg, base)
+        .post(&url, body.to_string())
         .header("Content-Type", "application/json")
-        .header("Origin", feed::origin(base))
+        .header("Origin", &feed::origin(base))
         .header("Referer", referer.as_str())
-        .header("Cookie", cookies.header())
-        .send(json!({"type": "video_channel_url", "url": share_url, "scene": 1}).to_string())
+        .cookie(&cookie)
+        .timeout(cfg.limits.api_timeout)
+        .send()
         .map_err(|e| FetchError::Network(e.to_string()))?;
-    let status = response.status().as_u16();
+    let status = response.status();
     match status {
         200..=299 => {}
         401 => return Err(FetchError::LoginRequired("yuanbao HTTP 401".into()).into()),

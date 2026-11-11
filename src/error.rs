@@ -1,6 +1,6 @@
 //! 这个插件能报的失败，和它们在协议里的错误码（协议 §3.3）。
 
-use usuyo_plugin::protocol::{CallFailure, ErrorCode};
+use usuyo_plugin_kit::protocol::{CallFailure, ErrorCode};
 
 use crate::YUANBAO_SITE;
 

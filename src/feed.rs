@@ -10,7 +10,9 @@ use std::hash::BuildHasher;
 
 use serde_json::{Value, json};
 
-use crate::{Config, FetchError, api_agent, plain_snippet, read_body, retry_after};
+use usuyo_plugin_kit::http::{Client, Request};
+
+use crate::{Config, FetchError, api_client, plain_snippet, read_body, retry_after};
 
 const FEED_API: &str = "/finder-preview/api/feed/get_feed_info";
 /// feed id 最长多少：比实际的长得多，只挡住拼进来的长串。
@@ -49,11 +51,11 @@ pub struct Parsed {
 
 /// 匿名调一次：不带任何 cookie，只带 Origin、Referer。
 pub fn anonymous(cfg: &Config, code: &str) -> Result<AnonymousFeed, FetchError> {
-    let (request, body) = anonymous_request(cfg, code);
-    let mut response = request
-        .send(body.to_string())
+    let client = api_client(cfg, &cfg.endpoints.channels);
+    let mut response = anonymous_request(cfg, &client, code)
+        .send()
         .map_err(|e| FetchError::Network(e.to_string()))?;
-    let status = response.status().as_u16();
+    let status = response.status();
     match status {
         200..=299 => {}
         429 => {
@@ -94,21 +96,20 @@ pub fn anonymous(cfg: &Config, code: &str) -> Result<AnonymousFeed, FetchError> 
 }
 
 /// 匿名请求（推断，见模块说明）：body 只有 `shortUri`；Referer 是浏览器打开分享链接后落到的页面。
-fn anonymous_request(
-    cfg: &Config,
-    code: &str,
-) -> (ureq::RequestBuilder<ureq::typestate::WithBody>, Value) {
+fn anonymous_request<'c>(cfg: &Config, client: &'c Client, code: &str) -> Request<'c> {
     let base = &cfg.endpoints.channels;
     let page = page_url(cfg, "/finder-preview/pages/sph");
     let referer = format!("{page}?id={code}");
-    let request = api_agent(cfg.limits.api_timeout)
-        .post(api_url(cfg).as_str())
-        .query("_rid", rid())
-        .query("_pageUrl", page)
+    let mut url = api_url(cfg);
+    url.query_pairs_mut()
+        .append_pair("_rid", &rid())
+        .append_pair("_pageUrl", &page);
+    client
+        .post(&url, json!({"shortUri": code}).to_string())
         .header("Content-Type", "application/json")
-        .header("Origin", origin(base))
-        .header("Referer", referer);
-    (request, json!({"shortUri": code}))
+        .header("Origin", &origin(base))
+        .header("Referer", &referer)
+        .timeout(cfg.limits.api_timeout)
 }
 
 /// 回答里的 feed id（推断）：先找 `feedInfo.exportId`，再找 `feedInfo.objectId`。

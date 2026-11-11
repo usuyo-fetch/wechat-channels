@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use serde_json::json;
-use usuyo_plugin::protocol::{
+use usuyo_plugin_kit::protocol::{
     Access, Author, Completeness, Evidence, FetchOutput, ItemKind, Media, MediaKind, OutputKind,
     RelPath, Rfc3339, TextFormat,
 };

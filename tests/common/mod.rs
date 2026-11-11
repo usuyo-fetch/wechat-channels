@@ -1,11 +1,12 @@
 //! 测试用的本机 HTTP 服务：按路由回固定内容，记下收到的每个请求。不碰真网络。
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{IpAddr, SocketAddr, TcpListener};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use usuyo_fetch_wechat_channels::{Config, Endpoints, Limits};
+use usuyo_plugin_kit::http::Policy;
 
 #[derive(Debug, Clone)]
 pub struct Request {
@@ -160,13 +161,31 @@ impl Server {
     }
 }
 
+/// 测试用的地址策略：只有 127.0.0.1 算公网，不查真的 DNS。
+/// `loop.test` 在 CDN 名单里，但解析到 127.0.0.2，用来测跳转去回环地址。
+pub fn local_policy() -> Policy {
+    fn lookup(host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        match host {
+            "loop.test" => Ok(vec![SocketAddr::from(([127, 0, 0, 2], port))]),
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such host",
+            )),
+        }
+    }
+    Policy {
+        lookup,
+        public: |ip| ip == IpAddr::from([127, 0, 0, 1]),
+    }
+}
+
 /// 分享页接口和 CDN 在一个服务上，元宝在另一个服务上。
 pub fn config(channels: &Server, yuanbao: &Server) -> Config {
     Config {
         endpoints: Endpoints {
             channels: url::Url::parse(&channels.base).unwrap(),
             yuanbao: url::Url::parse(&yuanbao.base).unwrap(),
-            media_hosts: vec!["127.0.0.1".into()],
+            media_hosts: vec!["127.0.0.1".into(), "loop.test".into()],
             media_https_only: false,
         },
         limits: Limits {
@@ -178,6 +197,7 @@ pub fn config(channels: &Server, yuanbao: &Server) -> Config {
             video_bytes: 1 << 20,
             video_stall: Duration::from_secs(1),
         },
+        policy: local_policy(),
     }
 }
 

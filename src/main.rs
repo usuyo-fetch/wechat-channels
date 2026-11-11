@@ -7,7 +7,7 @@ use anyhow::Context;
 use serde::Serialize;
 use usuyo_fetch_wechat_channels::credentials::{self, YuanbaoCookies};
 use usuyo_fetch_wechat_channels::{Config, FetchError, canonicalize, fetch, health};
-use usuyo_plugin::protocol::{Envelope, OutputKind};
+use usuyo_plugin_kit::protocol::{Envelope, OutputKind};
 
 const USAGE: &str = "usage: usuyo-fetch-wechat-channels canonicalize <url> | fetch <url> --out <dir> [--want a,b] | health [--probe]";
 
