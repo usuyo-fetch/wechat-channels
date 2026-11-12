@@ -1,4 +1,5 @@
-//! 可选的一步：用你的腾讯元宝登录换一个临时 token，再带 token 调分享页的接口拿视频地址。
+//! 方法 `yuanbao`：用你的腾讯元宝登录换一个临时 token，再带 token 调分享页的接口拿视频地址。
+//! 账号只用在这一样上；作者、描述、封面由不带账号的 `feed-info` 取。
 //!
 //! 请求和回答的处理移植自 ParseHub `src/parsehub/provider_api/wxchannels.py`
 //! （https://github.com/z-mio/ParseHub ，提交 4b93e2d7，2026-11-09），许可证如下：
@@ -25,9 +26,9 @@
 //! OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 //! SOFTWARE.
 //!
-//! 和 ParseHub 的不同：登录失效（401、错误码 20000）和限流整次失败，其余拿不到视频的情况
-//! （连不上、超时、回答解析不出、重定向）不算失败，只把这一段记成缺的，
-//! 已经拿到的作者、描述、封面照样交回（协议 §3.1「拿到一部分就回 partial」）；不跟重定向。
+//! 和 ParseHub 的不同：不跟重定向；登录失效（401、错误码 20000）回 `login-required`，限流回 `rate-limited`，
+//! 连不上回 `network`；元宝或视频号没给出视频地址（[`VideoError::Missed`]、[`VideoError::Unreadable`]）由
+//! `fetch::yuanbao` 报成 `upstream-changed`，读不出的回答开头随错误交给宿主。
 
 use serde_json::{Value, json};
 use usuyo_plugin_kit::http::Cookie;
@@ -44,11 +45,26 @@ const LOGIN_EXPIRED: &str = "20000";
 /// token、export id 最长多少：只挡住异常长的值。
 const MAX_TOKEN: usize = 4096;
 
-/// 这一段为什么没拿到视频。`Missed` 不算失败，原因写进 `missingReason`。
+/// 这一段为什么没拿到视频。`Missed`、`Unreadable` 是平台没给出视频地址，原因是给你看的一句话；
+/// `Unreadable` 另带平台回答的开头。
 #[derive(Debug)]
 pub enum VideoError {
     Fatal(FetchError),
     Missed(String),
+    Unreadable { why: String, answer: Vec<u8> },
+}
+
+impl VideoError {
+    /// 这种方法只取视频：没取到就是这次调用失败。
+    pub fn into_fetch_error(self) -> FetchError {
+        match self {
+            VideoError::Fatal(e) => e,
+            VideoError::Missed(why) => FetchError::UpstreamChanged(why),
+            VideoError::Unreadable { why, answer } => {
+                FetchError::UpstreamChanged(why).answered(&answer)
+            }
+        }
+    }
 }
 
 impl From<FetchError> for VideoError {
@@ -78,13 +94,7 @@ pub fn exchange(
     code: &str,
     cookies: &YuanbaoCookies,
 ) -> Result<Exchange, VideoError> {
-    let root = call_parse(cfg, &link::share_url(code), cookies).map_err(|e| match e {
-        VideoError::Fatal(FetchError::Network(detail)) => {
-            eprintln!("yuanbao request failed: {detail}");
-            VideoError::Missed("连不上腾讯元宝，这次没有取视频".into())
-        }
-        other => other,
-    })?;
+    let root = call_parse(cfg, &link::share_url(code), cookies)?;
     if let Some(error) = root.get("error").filter(|e| !e.is_null()) {
         let code = error_code(error);
         if code.as_deref() == Some(LOGIN_EXPIRED) {
@@ -150,10 +160,7 @@ pub fn video_feed(cfg: &Config, ex: &Exchange) -> Result<VideoFeed, VideoError> 
         .header("Referer", &ex.playable_url)
         .timeout(cfg.limits.api_timeout)
         .send()
-        .map_err(|e| {
-            eprintln!("feed request with token failed: {e}");
-            VideoError::Missed("带临时凭证调视频号接口时连不上，这次没有取视频".into())
-        })?;
+        .map_err(|e| FetchError::Network(format!("feed request with token: {e}")))?;
     let status = response.status();
     match status {
         200..=299 => {}
@@ -165,20 +172,21 @@ pub fn video_feed(cfg: &Config, ex: &Exchange) -> Result<VideoFeed, VideoError> 
             .into());
         }
         _ => {
-            return Err(VideoError::Missed(format!(
-                "视频号接口带临时凭证时返回 HTTP {status}"
-            )));
+            return Err(VideoError::Unreadable {
+                why: format!("视频号接口带临时凭证时返回 HTTP {status}"),
+                answer: read_body(&mut response, cfg.limits.api_bytes).unwrap_or_default(),
+            });
         }
     }
-    let raw = read_body(&mut response, cfg.limits.api_bytes).map_err(|e| {
-        eprintln!("feed answer with token unreadable: {e}");
-        VideoError::Missed("带临时凭证调视频号接口时没有读完回答，这次没有取视频".into())
-    })?;
-    let parsed = feed::parse(&raw).map_err(|r| {
-        VideoError::Missed(match r {
-            Rejected::Unavailable(text) => format!("视频号接口没有给出视频：{text}"),
-            Rejected::Malformed(_) => "视频号接口带临时凭证时的回答解析不出，接口可能改了".into(),
-        })
+    let raw = read_body(&mut response, cfg.limits.api_bytes)?;
+    let parsed = feed::parse(&raw).map_err(|r| match r {
+        Rejected::Unavailable(text) => {
+            VideoError::Missed(format!("视频号接口没有给出视频：{text}"))
+        }
+        Rejected::Malformed(_) => VideoError::Unreadable {
+            why: "视频号接口带临时凭证时的回答解析不出，接口可能改了".into(),
+            answer: raw.clone(),
+        },
     })?;
     let info = &parsed.feed_info;
     let nested = |key: &str| match info.get(key) {
@@ -224,11 +232,11 @@ pub fn probe(cfg: &Config, cookies: &YuanbaoCookies) -> Result<bool, FetchError>
         Err(VideoError::Fatal(FetchError::LoginRequired(_))) => Ok(false),
         Err(VideoError::Fatal(e)) => Err(e),
         // 回答解析不出不等于登录被拒
-        Err(VideoError::Missed(_)) => Ok(true),
+        Err(VideoError::Missed(_) | VideoError::Unreadable { .. }) => Ok(true),
     }
 }
 
-/// 连不上时回 `Fatal(Network)`：`exchange` 把它记成缺的，`probe` 照实报出去。
+/// 连不上时回 `Fatal(Network)`。
 fn call_parse(
     cfg: &Config,
     share_url: &str,
@@ -262,14 +270,21 @@ fn call_parse(
             }
             .into());
         }
-        _ => return Err(VideoError::Missed(format!("腾讯元宝返回 HTTP {status}"))),
+        _ => {
+            return Err(VideoError::Unreadable {
+                why: format!("腾讯元宝返回 HTTP {status}"),
+                answer: read_body(&mut response, cfg.limits.api_bytes).unwrap_or_default(),
+            });
+        }
     }
     let raw = read_body(&mut response, cfg.limits.api_bytes).map_err(|e| match e {
         FetchError::Network(_) => VideoError::Fatal(e),
         _ => VideoError::Missed("腾讯元宝的回答太大，它的接口可能改了".into()),
     })?;
-    serde_json::from_slice(&raw)
-        .map_err(|_| VideoError::Missed("腾讯元宝的回答解析不出，它的接口可能改了".into()))
+    serde_json::from_slice(&raw).map_err(|_| VideoError::Unreadable {
+        why: "腾讯元宝的回答解析不出，它的接口可能改了".into(),
+        answer: raw.clone(),
+    })
 }
 
 /// 元宝错误对象里的 `code`：参照源码按字符串比，数字和字符串都接。

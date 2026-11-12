@@ -65,15 +65,16 @@ pub fn anonymous(cfg: &Config, code: &str) -> Result<AnonymousFeed, FetchError> 
         }
         500..=599 => return Err(FetchError::Network(format!("feed API HTTP {status}"))),
         _ => {
-            return Err(FetchError::UpstreamChanged(format!(
-                "feed API HTTP {status}"
-            )));
+            let head = read_body(&mut response, cfg.limits.api_bytes).unwrap_or_default();
+            return Err(
+                FetchError::UpstreamChanged(format!("feed API HTTP {status}")).answered(&head),
+            );
         }
     }
     let raw = read_body(&mut response, cfg.limits.api_bytes)?;
     let parsed = parse(&raw).map_err(|r| match r {
         Rejected::Unavailable(text) => FetchError::NotFound(text),
-        Rejected::Malformed(why) => FetchError::UpstreamChanged(why),
+        Rejected::Malformed(why) => FetchError::UpstreamChanged(why).answered(&raw),
     })?;
     let FeedFields {
         description,
@@ -84,7 +85,8 @@ pub fn anonymous(cfg: &Config, code: &str) -> Result<AnonymousFeed, FetchError> 
     if description.is_none() && cover_url.is_none() && author.is_none() {
         return Err(FetchError::UpstreamChanged(
             "feed answer has no description, cover or author".into(),
-        ));
+        )
+        .answered(&raw));
     }
     Ok(AnonymousFeed {
         status,

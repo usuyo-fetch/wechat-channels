@@ -1,4 +1,8 @@
-//! 取一条（协议 §3.6、§3.7）：匿名的元数据和封面，有元宝登录时再加视频。
+//! 取一条（协议 §3.6、§3.7），两种方法（§2.3.1）：
+//!
+//! - `feed-info`：不带账号读分享页的接口，交作者、描述、封面和发布时间。这一条的视频它取不到，
+//!   总在 `missing` 里写 `media:video`，宿主再找声明了视频的方法。
+//! - `yuanbao`：用你的腾讯元宝登录换临时凭证，只交视频文件。
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -12,80 +16,50 @@ use usuyo_plugin_kit::protocol::{
 
 use crate::credentials::YuanbaoCookies;
 use crate::feed::FeedFields;
-use crate::yuanbao::{self, VideoError};
-use crate::{Config, FetchError, YUANBAO_SITE, download, feed, identity, link};
+use crate::{Config, FetchError, YUANBAO_SITE, download, feed, identity, link, yuanbao};
 
-/// 本插件能给的输出，和清单里的 `outputs` 一致。
-pub const OUTPUTS: [OutputKind; 4] = [
-    OutputKind::Text,
-    OutputKind::Images,
-    OutputKind::Video,
-    OutputKind::Meta,
-];
+/// `feed-info` 的输出，和清单里这种方法的 `outputs` 一致。
+pub const FEED_OUTPUTS: [OutputKind; 3] = [OutputKind::Text, OutputKind::Images, OutputKind::Meta];
+/// `yuanbao` 的输出。
+pub const YUANBAO_OUTPUTS: [OutputKind; 1] = [OutputKind::Video];
 
 const VIDEO_FILE: &str = "media/video.mp4";
 
-/// 没登录元宝时的 `missingReason`。
-pub const NO_LOGIN_REASON: &str =
+/// `feed-info` 交不出视频时的 `missingReason`。
+pub const NO_VIDEO_REASON: &str =
     "分享页没有给出视频地址；在设置里登录腾讯元宝后，可以用元宝账号取到视频";
 
-/// `cookies` 是宿主传来的元宝登录；没有就只取匿名那部分。
-pub fn fetch(
-    cfg: &Config,
-    input: &str,
-    out: &Path,
+fn wanted(
     want: Option<&[OutputKind]>,
-    cookies: Option<&YuanbaoCookies>,
-) -> Result<FetchOutput, FetchError> {
-    let code = link::short_code(input)
-        .ok_or_else(|| FetchError::UnsupportedInput(input.chars().take(200).collect()))?;
-    let wanted: BTreeSet<OutputKind> =
-        want.map_or_else(|| OUTPUTS.into(), |w| w.iter().copied().collect());
-    if let Some(other) = wanted.iter().find(|w| !OUTPUTS.contains(w)) {
+    outputs: &[OutputKind],
+) -> Result<BTreeSet<OutputKind>, FetchError> {
+    let wanted: BTreeSet<OutputKind> = want.map_or_else(
+        || outputs.iter().copied().collect(),
+        |w| w.iter().copied().collect(),
+    );
+    if let Some(other) = wanted.iter().find(|w| !outputs.contains(w)) {
         return Err(FetchError::InvalidArgs(format!("cannot give `{other}`")));
     }
+    Ok(wanted)
+}
 
-    let fetched_at = Rfc3339::from_timestamp(jiff::Timestamp::now());
-    let anon = feed::anonymous(cfg, &code)?;
-    let mut reasons: Vec<String> = Vec::new();
+fn short_code(input: &str) -> Result<String, FetchError> {
+    link::short_code(input)
+        .ok_or_else(|| FetchError::UnsupportedInput(input.chars().take(200).collect()))
+}
 
-    // 元宝那一段：只在要视频、而且宿主传了元宝登录时走
-    let mut video: Option<(yuanbao::Exchange, yuanbao::VideoFeed)> = None;
-    if wanted.contains(&OutputKind::Video) {
-        match cookies {
-            None => reasons.push(NO_LOGIN_REASON.into()),
-            Some(cookies) => {
-                match yuanbao::exchange(cfg, &code, cookies)
-                    .and_then(|ex| yuanbao::video_feed(cfg, &ex).map(|v| (ex, v)))
-                {
-                    Ok(got) => video = Some(got),
-                    Err(VideoError::Fatal(e)) => return Err(e),
-                    Err(VideoError::Missed(why)) => {
-                        eprintln!("video step skipped: {why}");
-                        reasons.push(why);
-                    }
-                }
-            }
-        }
-    }
-
-    // 匿名回答缺的字段，用带 token 那次的补上
-    let token_fields = video.as_ref().map(|(_, v)| &v.fields);
-    let pick = |f: fn(&FeedFields) -> &Option<String>| {
-        f(&anon.fields)
-            .clone()
-            .or_else(|| token_fields.and_then(|t| f(t).clone()))
-    };
-    let description = pick(|f| &f.description).filter(|d| !d.trim().is_empty());
-    let cover_url = pick(|f| &f.cover_url).filter(|u| !u.trim().is_empty());
-    let author = pick(|f| &f.author);
-
-    let mut output = FetchOutput {
-        identity: Some(identity(&code)),
+fn empty_output(
+    code: &str,
+    access: Access,
+    site: Option<&str>,
+    status: Option<u16>,
+) -> FetchOutput {
+    FetchOutput {
+        identity: Some(identity(code)),
         kind: ItemKind::Video,
         title: None,
         author: None,
-        published_at: published_at(&anon.fields, token_fields),
+        published_at: None,
         text: None,
         text_format: None,
         html: None,
@@ -97,20 +71,34 @@ pub fn fetch(
         missing: Vec::new(),
         missing_reason: None,
         evidence: Evidence {
-            fetched_at,
-            access: if cookies.is_some() && wanted.contains(&OutputKind::Video) {
-                Access::SessionApi
-            } else {
-                Access::PublicWeb
-            },
-            site: (cookies.is_some() && wanted.contains(&OutputKind::Video))
-                .then(|| YUANBAO_SITE.into()),
+            fetched_at: Rfc3339::from_timestamp(jiff::Timestamp::now()),
+            access,
+            site: site.map(str::to_owned),
             upstream: None,
-            status: Some(anon.status),
+            status,
         },
         credentials_update: None,
-    };
+    }
+}
 
+/// `feed-info`：不带任何 cookie。
+pub fn feed_info(
+    cfg: &Config,
+    input: &str,
+    out: &Path,
+    want: Option<&[OutputKind]>,
+) -> Result<FetchOutput, FetchError> {
+    let code = short_code(input)?;
+    let wanted = wanted(want, &FEED_OUTPUTS)?;
+    let anon = feed::anonymous(cfg, &code)?;
+    let mut reasons: Vec<String> = Vec::new();
+    let fields = &anon.fields;
+    let description = fields.description.clone().filter(|d| !d.trim().is_empty());
+    let cover_url = fields.cover_url.clone().filter(|u| !u.trim().is_empty());
+    let author = fields.author.clone();
+
+    let mut output = empty_output(&code, Access::PublicWeb, None, Some(anon.status));
+    output.published_at = published_at(fields);
     if wanted.contains(&OutputKind::Text) {
         output.text = description.clone();
         output.text_format = output.text.as_ref().map(|_| TextFormat::Plain);
@@ -137,29 +125,11 @@ pub fn fetch(
             Err(why) => reasons.push(why),
         }
     }
-    if let Some((_, v)) = &video {
-        match download::video(cfg, &v.video_url, &out.join(VIDEO_FILE)) {
-            Ok(_) => output.media.push(Media {
-                path: rel(VIDEO_FILE)?,
-                kind: MediaKind::Video,
-                mime: Some("video/mp4".into()),
-                lang: None,
-                duration_sec: None,
-                group: None,
-            }),
-            Err(why) => {
-                eprintln!("video download skipped: {why}");
-                reasons.push(why);
-            }
-        }
-    }
     if wanted.contains(&OutputKind::Meta) {
         // 协议的输出没有短码、描述、封面地址这几栏，写进 meta.json，随快照留在 raw/。
-        // 不写元宝的回答和临时 token。
         let meta = json!({
             "shareUrl": link::share_url(&code),
             "shortCode": code,
-            "exportId": video.as_ref().map(|(ex, _)| ex.export_id.as_str()),
             "author": author,
             "description": description,
             "coverUrl": cover_url,
@@ -172,8 +142,8 @@ pub fn fetch(
             .map_err(|e| FetchError::Internal(format!("write feed.json: {e}")))?;
     }
 
-    // 缺的 = 这一条有、想要、又没交来的（协议 §3.7）。
-    // 这个平台的每一条都是视频，视频总是有的；没有描述就没有文字，没有封面地址就没有图片
+    // 缺的 = 这一条有、想要、又没交来的（协议 §3.7）。没有描述就没有文字，没有封面地址就没有图片。
+    // 这个平台的每一条都是视频：没给 `--want`（什么都想要）时视频总算缺，宿主去找能取视频的方法。
     let mut absent: BTreeSet<OutputKind> = BTreeSet::new();
     if description.is_none() {
         absent.insert(OutputKind::Text);
@@ -187,15 +157,13 @@ pub fn fetch(
         .filter(|kind| !absent.contains(kind) && !obtained.contains(kind))
         .copied()
         .collect();
+    if want.is_none() {
+        output.missing.push(OutputKind::Video);
+        reasons.insert(0, NO_VIDEO_REASON.into());
+    }
     output.completeness = if output.missing.is_empty() {
         Completeness::Full
     } else if obtained.is_disjoint(&wanted) {
-        // 只要视频、又没登录元宝：说清楚要登录，而不是交回一个空快照
-        if cookies.is_none() && wanted == BTreeSet::from([OutputKind::Video]) {
-            return Err(FetchError::LoginRequired(
-                "only media:video was wanted and there is no yuanbao login".into(),
-            ));
-        }
         Completeness::Link
     } else {
         Completeness::Partial
@@ -206,9 +174,41 @@ pub fn fetch(
     Ok(output)
 }
 
-/// 发布时间：匿名回答的 `createtime`，缺了用带 token 那次的。
-fn published_at(anon: &FeedFields, token: Option<&FeedFields>) -> Option<Rfc3339> {
-    let secs = anon.created_at.or_else(|| token?.created_at)?;
+/// `yuanbao`：只交视频。宿主没交元宝的登录就回 `login-required`。
+pub fn yuanbao(
+    cfg: &Config,
+    input: &str,
+    out: &Path,
+    want: Option<&[OutputKind]>,
+    cookies: Option<&YuanbaoCookies>,
+) -> Result<FetchOutput, FetchError> {
+    let code = short_code(input)?;
+    wanted(want, &YUANBAO_OUTPUTS)?;
+    let cookies = cookies.ok_or_else(|| {
+        FetchError::LoginRequired("there is no yuanbao login for this call".into())
+    })?;
+    let exchange =
+        yuanbao::exchange(cfg, &code, cookies).map_err(yuanbao::VideoError::into_fetch_error)?;
+    let video =
+        yuanbao::video_feed(cfg, &exchange).map_err(yuanbao::VideoError::into_fetch_error)?;
+    download::video(cfg, &video.video_url, &out.join(VIDEO_FILE))
+        .map_err(FetchError::UpstreamChanged)?;
+    let mut output = empty_output(&code, Access::SessionApi, Some(YUANBAO_SITE), None);
+    output.published_at = published_at(&video.fields);
+    output.media.push(Media {
+        path: rel(VIDEO_FILE)?,
+        kind: MediaKind::Video,
+        mime: Some("video/mp4".into()),
+        lang: None,
+        duration_sec: None,
+        group: None,
+    });
+    Ok(output)
+}
+
+/// 发布时间：回答里的 `createtime`。
+fn published_at(fields: &FeedFields) -> Option<Rfc3339> {
+    let secs = fields.created_at?;
     jiff::Timestamp::from_second(secs)
         .ok()
         .map(Rfc3339::from_timestamp)

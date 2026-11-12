@@ -1,4 +1,5 @@
-//! canonicalize 和 fetch 对着本机的假服务跑：分享页接口和 CDN 一个服务，元宝一个服务。
+//! canonicalize 和两种方法的 fetch 对着本机的假服务跑：分享页接口和 CDN 一个服务，元宝一个服务。
+//! `feed-info` 不带账号取作者、描述、封面；`yuanbao` 用元宝的登录只取视频。
 //! 固定回答照 ParseHub `wxchannels.py` 的解析写；匿名那一种的请求和回答形状 2026-11-12 对着真实平台实测过。
 
 mod common;
@@ -8,7 +9,7 @@ use std::sync::Arc;
 
 use common::{JPEG, Reply, Request, Server, config, fixture, mp4};
 use usuyo_fetch_wechat_channels::credentials::{self, YuanbaoCookies};
-use usuyo_fetch_wechat_channels::fetch::{NO_LOGIN_REASON, fetch};
+use usuyo_fetch_wechat_channels::fetch::{self, NO_VIDEO_REASON};
 use usuyo_fetch_wechat_channels::health::health;
 use usuyo_fetch_wechat_channels::{Config, FetchError, canonicalize, identity};
 use usuyo_plugin::protocol::{
@@ -86,12 +87,18 @@ impl Setup {
 }
 
 impl World {
-    fn fetch(
+    /// 方法 `feed-info`。
+    fn feed(&self, want: Option<&[OutputKind]>) -> Result<FetchOutput, FetchError> {
+        fetch::feed_info(&self.cfg, LINK, self.out.path(), want)
+    }
+
+    /// 方法 `yuanbao`。
+    fn video(
         &self,
         want: Option<&[OutputKind]>,
         cookies: Option<&YuanbaoCookies>,
     ) -> Result<FetchOutput, FetchError> {
-        fetch(&self.cfg, LINK, self.out.path(), want, cookies)
+        fetch::yuanbao(&self.cfg, LINK, self.out.path(), want, cookies)
     }
 
     fn files(&self) -> Vec<String> {
@@ -168,7 +175,7 @@ fn canonicalize_uses_the_short_code_and_makes_no_request() {
 #[test]
 fn anonymous_request_shape() {
     let w = Setup::default().start();
-    w.fetch(None, None).unwrap();
+    w.feed(None).unwrap();
     // 匿名请求：照分享页的 body，不带 cookie，只发给分享页的接口
     let reqs = w.channels.requests();
     let req = reqs
@@ -218,13 +225,13 @@ fn canonicalize_table_from_testdata() {
 }
 
 #[test]
-fn anonymous_fetch_is_partial() {
+fn feed_info_takes_no_account_and_says_the_video_is_missing() {
     let w = Setup::default().start();
-    let out = w.fetch(None, None).unwrap();
+    let out = w.feed(None).unwrap();
     assert_eq!(out.identity, Some(identity("AbC123")));
     assert_eq!(out.completeness, Completeness::Partial);
     assert_eq!(out.missing, [OutputKind::Video]);
-    assert_eq!(out.missing_reason.as_deref(), Some(NO_LOGIN_REASON));
+    assert_eq!(out.missing_reason.as_deref(), Some(NO_VIDEO_REASON));
     assert!(
         out.text
             .as_deref()
@@ -258,11 +265,11 @@ fn thin_anonymous_answer_still_stores_author_and_cover() {
         ..Setup::default()
     }
     .start();
-    let out = w.fetch(None, None).unwrap();
+    let out = w.feed(None).unwrap();
     // 没有描述就没有文字，不算缺；视频有、想要、没交来，算缺
     assert_eq!(out.completeness, Completeness::Partial);
     assert_eq!(out.missing, [OutputKind::Video]);
-    assert_eq!(out.missing_reason.as_deref(), Some(NO_LOGIN_REASON));
+    assert_eq!(out.missing_reason.as_deref(), Some(NO_VIDEO_REASON));
     assert!(out.text.is_none());
     assert_eq!(out.images.len(), 1);
     assert!(out.author.is_some());
@@ -279,7 +286,7 @@ fn a_part_the_post_never_had_is_not_missing() {
     }
     .start();
     let out = thin
-        .fetch(Some(&[OutputKind::Text, OutputKind::Images]), None)
+        .feed(Some(&[OutputKind::Text, OutputKind::Images]))
         .unwrap();
     assert_eq!(out.completeness, Completeness::Full);
     assert!(out.missing.is_empty() && out.missing_reason.is_none());
@@ -299,17 +306,17 @@ fn a_part_the_post_never_had_is_not_missing() {
     }
     .start();
     let out = bare
-        .fetch(Some(&[OutputKind::Text, OutputKind::Images]), None)
+        .feed(Some(&[OutputKind::Text, OutputKind::Images]))
         .unwrap();
     assert_eq!(out.completeness, Completeness::Full);
     assert!(out.missing.is_empty() && out.images.is_empty());
 }
 
 #[test]
-fn with_yuanbao_login_saves_the_video() {
+fn yuanbao_saves_only_the_video() {
     let w = Setup::default().start();
     let cookies = cookies();
-    let out = w.fetch(None, Some(&cookies)).unwrap();
+    let out = w.video(None, Some(&cookies)).unwrap();
     assert_eq!(
         out.completeness,
         Completeness::Full,
@@ -326,7 +333,15 @@ fn with_yuanbao_login_saves_the_video() {
     );
     assert_eq!(out.evidence.access, Access::SessionApi);
     assert_eq!(out.evidence.site.as_deref(), Some("yuanbao.tencent.com"));
-    // 身份只看匿名回答，登没登录都一样
+    // 账号只用在视频上：不交文字、封面和作者，不碰匿名接口
+    assert!(out.text.is_none() && out.images.is_empty() && out.author.is_none());
+    assert_eq!(w.files(), ["media/video.mp4"]);
+    assert!(
+        !w.channels
+            .requests()
+            .iter()
+            .any(|r| r.body.contains("shortUri"))
+    );
     assert_eq!(out.identity, Some(identity("AbC123")));
 
     // 元宝的请求：带 cookie，body 是重建的分享链接
@@ -370,24 +385,15 @@ fn with_yuanbao_login_saves_the_video() {
 #[test]
 fn output_dir_contents() {
     let w = Setup::default().start();
-    let out = w.fetch(None, Some(&cookies())).unwrap();
-    assert_eq!(
-        w.files(),
-        [
-            "feed.json",
-            "images/cover.jpg",
-            "media/video.mp4",
-            "meta.json"
-        ]
-    );
+    let out = w.feed(None).unwrap();
+    assert_eq!(w.files(), ["feed.json", "images/cover.jpg", "meta.json"]);
     for p in out.images.iter().chain(out.media.iter().map(|m| &m.path)) {
         assert!(w.out.path().join(p.as_str()).is_file(), "{p}");
     }
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(w.out.path().join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["shortCode"], "AbC123");
-    assert!(meta.get("feedId").is_none());
-    assert_eq!(meta["exportId"], EXPORT_ID);
+    assert!(meta.get("feedId").is_none() && meta.get("exportId").is_none());
     assert_eq!(meta["shareUrl"], LINK);
     // feed.json 是匿名回答的原样
     let raw = std::fs::read_to_string(w.out.path().join("feed.json")).unwrap();
@@ -403,26 +409,36 @@ fn output_dir_contents() {
 #[test]
 fn want_limits_the_work() {
     let w = Setup::default().start();
-    let out = w
-        .fetch(Some(&[OutputKind::Text]), Some(&cookies()))
-        .unwrap();
+    let out = w.feed(Some(&[OutputKind::Text])).unwrap();
+    // 给了 --want 就只看它：只要文字时视频不算缺
     assert_eq!(out.completeness, Completeness::Full);
-    assert!(out.images.is_empty());
+    assert!(out.images.is_empty() && out.missing.is_empty());
     assert!(w.files().is_empty(), "{:?}", w.files());
-    // 不要视频就不碰元宝账号
     assert!(w.yuanbao.requests().is_empty());
     assert_eq!(out.evidence.access, Access::PublicWeb);
+    // 每种方法只给自己的输出
+    assert_eq!(
+        code(w.feed(Some(&[OutputKind::Video])).unwrap_err()),
+        ErrorCode::InvalidArgs
+    );
+    assert_eq!(
+        code(
+            w.video(Some(&[OutputKind::Text]), Some(&cookies()))
+                .unwrap_err()
+        ),
+        ErrorCode::InvalidArgs
+    );
 }
 
 #[test]
-fn only_video_without_login_is_login_required() {
+fn yuanbao_without_login_is_login_required() {
     let w = Setup::default().start();
-    let failure = w
-        .fetch(Some(&[OutputKind::Video]), None)
-        .unwrap_err()
-        .into_failure();
-    assert_eq!(failure.code, ErrorCode::LoginRequired);
-    assert_eq!(failure.site.as_deref(), Some("yuanbao.tencent.com"));
+    for want in [None, Some(&[OutputKind::Video][..])] {
+        let failure = w.video(want, None).unwrap_err().into_failure();
+        assert_eq!(failure.code, ErrorCode::LoginRequired);
+        assert_eq!(failure.site.as_deref(), Some("yuanbao.tencent.com"));
+    }
+    assert!(w.yuanbao.requests().is_empty() && w.channels.requests().is_empty());
 }
 
 #[test]
@@ -438,7 +454,7 @@ fn expired_login() {
             ..Setup::default()
         }
         .start();
-        let failure = w.fetch(None, Some(&cookies())).unwrap_err().into_failure();
+        let failure = w.video(None, Some(&cookies())).unwrap_err().into_failure();
         assert_eq!(failure.code, ErrorCode::LoginRequired);
         assert_eq!(failure.site.as_deref(), Some("yuanbao.tencent.com"));
         assert!(failure.hint.as_deref().unwrap().contains("腾讯元宝"));
@@ -454,13 +470,13 @@ fn yuanbao_rate_limit_pauses_the_plugin() {
     }
     .start();
     assert_eq!(
-        code(w.fetch(None, Some(&cookies())).unwrap_err()),
+        code(w.video(None, Some(&cookies())).unwrap_err()),
         ErrorCode::RateLimited
     );
 }
 
 #[test]
-fn other_video_failures_keep_the_metadata() {
+fn other_video_failures_say_why() {
     let cases: [(&str, Setup); 5] = [
         (
             "腾讯元宝没有给出这条视频的地址",
@@ -508,22 +524,34 @@ fn other_video_failures_keep_the_metadata() {
     ];
     for (reason, setup) in cases {
         let w = setup.start();
-        let out = w.fetch(None, Some(&cookies())).unwrap();
-        assert_eq!(out.completeness, Completeness::Partial, "{reason}");
-        assert_eq!(out.missing, [OutputKind::Video], "{reason}");
-        let got = out.missing_reason.unwrap();
-        assert!(got.contains(reason), "{reason}: {got}");
-        assert!(out.text.is_some() && !out.images.is_empty());
+        let failure = w.video(None, Some(&cookies())).unwrap_err().into_failure();
+        assert_eq!(failure.code, ErrorCode::UpstreamChanged, "{reason}");
+        assert!(
+            failure.message.contains(reason),
+            "{reason}: {}",
+            failure.message
+        );
         assert!(
             !w.files().iter().any(|f| f.starts_with("media/")),
             "{reason}: {:?}",
             w.files()
         );
     }
+    // 读不出的回答，开头跟着错误走（宿主记进失败日志）
+    let w = Setup {
+        yuanbao: Arc::new(|_| Reply::json(200, "<html>")),
+        ..Setup::default()
+    }
+    .start();
+    let failure = w.video(None, Some(&cookies())).unwrap_err().into_failure();
+    assert_eq!(
+        failure.detail.as_deref().map(String::as_str),
+        Some("<html>")
+    );
 }
 
 #[test]
-fn stalled_video_gives_up_and_keeps_the_rest() {
+fn stalled_video_gives_up() {
     let w = Setup {
         video: Arc::new(|_| Reply {
             stall_after: Some(64),
@@ -533,10 +561,13 @@ fn stalled_video_gives_up_and_keeps_the_rest() {
     }
     .start();
     let started = std::time::Instant::now();
-    let out = w.fetch(None, Some(&cookies())).unwrap();
+    let failure = w.video(None, Some(&cookies())).unwrap_err().into_failure();
     assert!(started.elapsed() < std::time::Duration::from_secs(8));
-    assert_eq!(out.missing, [OutputKind::Video]);
-    assert!(out.missing_reason.unwrap().contains("没有新数据"));
+    assert!(
+        failure.message.contains("没有新数据"),
+        "{}",
+        failure.message
+    );
     assert!(!w.files().iter().any(|f| f.starts_with("media/")));
 }
 
@@ -551,9 +582,11 @@ fn non_mp4_video_is_refused_on_the_first_bytes() {
         ..Setup::default()
     }
     .start();
-    let out = w.fetch(None, Some(&cookies())).unwrap();
-    assert_eq!(out.missing, [OutputKind::Video]);
-    let reason = out.missing_reason.unwrap();
+    let reason = w
+        .video(None, Some(&cookies()))
+        .unwrap_err()
+        .into_failure()
+        .message;
     assert!(reason.contains("不是能直接播放的 MP4"), "{reason}");
     assert!(!w.files().iter().any(|f| f.starts_with("media/")));
 }
@@ -576,10 +609,12 @@ fn malformed_answers_are_upstream_changed() {
             ..Setup::default()
         }
         .start();
+        let failure = w.feed(None).unwrap_err().into_failure();
+        assert_eq!(failure.code, ErrorCode::UpstreamChanged, "{body}");
+        // 平台原样的回答跟着错误走
         assert_eq!(
-            code(w.fetch(None, None).unwrap_err()),
-            ErrorCode::UpstreamChanged,
-            "{body}"
+            failure.detail.as_deref().map(String::as_str),
+            Some(body.as_str())
         );
         assert!(w.files().is_empty(), "{body}");
     }
@@ -597,7 +632,7 @@ fn error_shape_is_upstream_changed_with_the_message() {
         ..Setup::default()
     }
     .start();
-    let failure = w.fetch(None, None).unwrap_err().into_failure();
+    let failure = w.feed(None).unwrap_err().into_failure();
     assert_eq!(failure.code, ErrorCode::UpstreamChanged);
     let text = serde_json::to_string(&failure).unwrap();
     assert!(
@@ -616,7 +651,7 @@ fn feed_level_failures() {
     }
     .start();
     assert_eq!(
-        code(unavailable.fetch(None, None).unwrap_err()),
+        code(unavailable.feed(None).unwrap_err()),
         ErrorCode::NotFound
     );
 
@@ -626,7 +661,7 @@ fn feed_level_failures() {
     }
     .start();
     assert_eq!(
-        code(limited.fetch(None, None).unwrap_err()),
+        code(limited.feed(None).unwrap_err()),
         ErrorCode::RateLimited
     );
 
@@ -635,21 +670,21 @@ fn feed_level_failures() {
         ..Setup::default()
     }
     .start();
-    assert_eq!(
-        code(down.fetch(None, None).unwrap_err()),
-        ErrorCode::Network
-    );
+    assert_eq!(code(down.feed(None).unwrap_err()), ErrorCode::Network);
 }
 
 #[test]
 fn foreign_links_are_unsupported() {
     let w = Setup::default().start();
-    let err = fetch(
+    let err =
+        fetch::feed_info(&w.cfg, "https://example.com/sph/AbC123", w.out.path(), None).unwrap_err();
+    assert_eq!(code(err), ErrorCode::UnsupportedInput);
+    let err = fetch::yuanbao(
         &w.cfg,
         "https://example.com/sph/AbC123",
         w.out.path(),
         None,
-        None,
+        Some(&cookies()),
     )
     .unwrap_err();
     assert_eq!(code(err), ErrorCode::UnsupportedInput);
@@ -674,18 +709,20 @@ fn probe_reports_the_yuanbao_login() {
     ] {
         let yb = Server::start(move |_| Reply::json(200, reply));
         let cfg = config(&channels, &yb);
-        let got = health(&cfg, true, Some(&cookies())).unwrap();
+        let got = serde_json::to_value(health(&cfg, true, Some(&cookies())).unwrap()).unwrap();
         assert_eq!(got["login"][0]["site"], "yuanbao.tencent.com");
         assert_eq!(got["login"][0]["state"], state, "{reply}");
         assert_eq!(yb.requests().len(), 1);
     }
     let yb = Server::start(|_| Reply::json(401, "{}"));
-    let got = health(&config(&channels, &yb), true, Some(&cookies())).unwrap();
+    let got =
+        serde_json::to_value(health(&config(&channels, &yb), true, Some(&cookies())).unwrap())
+            .unwrap();
     assert_eq!(got["login"][0]["state"], "rejected");
 
     // 没有登录时 --probe 也不发请求
     let idle = Server::start(|_| Reply::json(500, "{}"));
-    let got = health(&config(&channels, &idle), true, None).unwrap();
+    let got = serde_json::to_value(health(&config(&channels, &idle), true, None).unwrap()).unwrap();
     assert_eq!(got["login"], serde_json::json!([]));
     assert!(idle.requests().is_empty());
     assert!(channels.requests().is_empty());
@@ -705,9 +742,8 @@ fn yuanbao_redirect_is_not_followed() {
         ..Setup::default()
     }
     .start();
-    let out = w.fetch(None, Some(&cookies())).unwrap();
-    assert_eq!(out.missing, [OutputKind::Video]);
-    assert!(out.missing_reason.unwrap().contains("HTTP 302"));
+    let failure = w.video(None, Some(&cookies())).unwrap_err().into_failure();
+    assert!(failure.message.contains("HTTP 302"), "{}", failure.message);
     assert!(target.requests().is_empty(), "{:?}", target.requests());
     for r in w.channels.requests() {
         assert!(!r.dump().contains(SENTINEL));
@@ -715,18 +751,16 @@ fn yuanbao_redirect_is_not_followed() {
 }
 
 #[test]
-fn unreachable_yuanbao_keeps_the_metadata() {
+fn unreachable_yuanbao_is_a_network_failure() {
     let w = Setup::default().start();
     let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let mut cfg = w.cfg.clone();
     cfg.endpoints.yuanbao =
         url::Url::parse(&format!("http://{}", closed.local_addr().unwrap())).unwrap();
     drop(closed);
-    let out = fetch(&cfg, LINK, w.out.path(), None, Some(&cookies())).unwrap();
-    assert_eq!(out.completeness, Completeness::Partial);
-    assert_eq!(out.missing, [OutputKind::Video]);
-    assert!(out.missing_reason.unwrap().contains("连不上腾讯元宝"));
-    assert!(out.text.is_some() && !out.images.is_empty());
+    // 这种方法只取视频：连不上就是网络问题，宿主照节奏等
+    let err = fetch::yuanbao(&cfg, LINK, w.out.path(), None, Some(&cookies())).unwrap_err();
+    assert_eq!(code(err), ErrorCode::Network);
 
     // health --probe 连不上时照实报 network，不说登录有效
     let err = health(&cfg, true, Some(&cookies())).unwrap_err();
@@ -734,8 +768,8 @@ fn unreachable_yuanbao_keeps_the_metadata() {
 }
 
 #[test]
-fn video_and_cover_failures_without_login_stay_partial() {
-    // 封面下载失败、又没登录：仍有描述和作者，回 partial，不回 login-required
+fn a_cover_failure_stays_partial() {
+    // 封面下载失败：仍有描述和作者，回 partial
     let w = Setup {
         anonymous: Arc::new(|r| {
             Reply::json(
@@ -747,7 +781,7 @@ fn video_and_cover_failures_without_login_stay_partial() {
         ..Setup::default()
     }
     .start();
-    let out = w.fetch(None, None).unwrap();
+    let out = w.feed(None).unwrap();
     assert_eq!(out.missing, [OutputKind::Images, OutputKind::Video]);
 }
 
@@ -777,9 +811,11 @@ fn media_redirects_cannot_leave_the_host_list() {
             ..Setup::default()
         }
         .start();
-        let out = w.fetch(None, Some(&cookies())).unwrap();
-        assert_eq!(out.missing, [OutputKind::Video], "{why}");
-        let reason = out.missing_reason.unwrap();
+        let reason = w
+            .video(None, Some(&cookies()))
+            .unwrap_err()
+            .into_failure()
+            .message;
         assert!(
             reason.contains("视频下载失败") && reason.contains(why),
             "{reason}"

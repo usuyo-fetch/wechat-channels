@@ -5,7 +5,7 @@ kind: fetch
 name: 微信视频号
 description: >-
   用手机上「分享 → 复制链接」得到的视频号链接取一条，用于个人备份、离线阅读。
-  不登录时只存作者、描述和封面；登录了腾讯元宝，才会用你的元宝账号换一个临时凭证去取视频文件。
+  不用账号存作者、描述和封面；视频文件另是一种方法，用你登录的腾讯元宝换一个临时凭证去取。
 version: 0.1.0
 license: MIT
 maintainers: [Fldicoahkiin]
@@ -15,23 +15,77 @@ upstream:
     license: MIT
 platforms: [wechat-channels]
 match: ["weixin.qq.com/sph/*", "channels.weixin.qq.com/finder-preview/pages/*"]
-access: session-api
-login: optional
 sites:
   - site: yuanbao.tencent.com
     name: 腾讯元宝
     credential: cookies
     loginUrl: https://yuanbao.tencent.com/
     # 登录后才有的 cookie 名还没核实，所以先不写 `cookies`
-capabilities:
-  fetch:
-    # 不登录：匿名读分享页的接口（public-web），只有作者、描述、封面。
-    # 登录了元宝：用你的元宝 cookie 换临时凭证再取视频地址（session-api），只有这一步用到元宝账号。
+# 几种方法各列一项（usuyo 协议 §2.3.1），没做的也列；行和 usuyo 仓库 docs/platforms/routes.md 第 4 节一一对应
+# （改客户端的 `wxcd` 在另一个组织）。
+methods:
+  - id: feed-info
+    name: 分享页接口
+    access: public-web
+    login: none
+    account: none
+    risk:
+      text: 匿名接口给的字段在收紧
+      source: {label: "usuyo platforms/wechat-channels.md §3.2", url: "https://github.com/usuyo/usuyo/blob/main/docs/platforms/wechat-channels.md#32-取单条"}
+    capabilities:
+      fetch:
+        outputs: [text, images, meta]
+  - id: yuanbao
+    name: 腾讯元宝换视频
     access: session-api
-    login: optional
+    login: required
+    account: in-usuyo
     sites: [yuanbao.tencent.com]
-    timeout: 30m
-    outputs: [text, images, media:video, meta]
+    risk:
+      text: 公开部署的解析服务被大量调用后，元宝账号被封
+      source: {label: "wx_channels_download #495", url: "https://github.com/ltaoo/wx_channels_download/issues/495"}
+    capabilities:
+      fetch:
+        timeout: 30m
+        outputs: [media:video]
+  - id: userscript
+    name: 网页版的浏览器脚本
+    built: false
+    access: browser-session
+    login: required
+    account: own-browser
+    delivers: links
+  - id: iphone
+    name: iPhone 镜像
+    built: false
+    access: vision-ui
+    login: required
+    account: own-phone
+    interaction: foreground
+    risk:
+      text: 微信协议 8.2.1.6 禁止用第三方软件读界面、自动操作；镜像没有处罚报告
+      source: {label: "调研 06 §1.2", url: "https://github.com/usuyo/usuyo/blob/main/docs/research/06-platform-access-and-account-risk.md#12-视觉层的风险从哪里来"}
+  - id: mac
+    name: 电脑微信
+    built: false
+    access: vision-ui
+    login: required
+    account: own-app
+    interaction: foreground
+  - id: android
+    name: 安卓手机
+    built: false
+    access: vision-ui
+    login: required
+    account: own-phone
+    interaction: foreground
+  - id: audio
+    name: 录下口播
+    built: false
+    access: vision-ui
+    login: required
+    account: own-phone
+    interaction: foreground
 pacing:
   wechat-channels: {batch: true, interval: 30s, daily: 50}
 permissions:

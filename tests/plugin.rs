@@ -110,6 +110,7 @@ fn binary_answers_foreign_links_offline() {
     let out = Command::new(BIN)
         .args(["fetch", "https://example.com/a", "--out"])
         .arg(dir.path())
+        .args(["--method", "feed-info"])
         .env_clear()
         .output()
         .unwrap();
@@ -128,9 +129,11 @@ fn binary_reports_a_bad_credentials_file_without_its_content() {
     )
     .unwrap();
     // 用不匹配的链接：就算读凭据的顺序变了，也不会向真的主机发请求
+    // 只有 yuanbao 读凭据
     let out = Command::new(BIN)
         .args(["fetch", "https://example.com/a", "--out"])
         .arg(dir.path())
+        .args(["--method", "yuanbao"])
         .env_clear()
         .env("USUYO_CREDENTIALS", &cred)
         .output()
@@ -139,4 +142,92 @@ fn binary_reports_a_bad_credentials_file_without_its_content() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("internal"), "{text}");
     assert!(!text.contains("98765"), "{text}");
+}
+
+#[test]
+fn every_routes_row_is_a_method_and_the_account_is_only_for_the_video() {
+    let (_tmp, host) = install();
+    let spec = &host.plugins()[0].spec;
+    let ids: Vec<&str> = spec.methods.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "feed-info",
+            "yuanbao",
+            "userscript",
+            "iphone",
+            "mac",
+            "android",
+            "audio"
+        ]
+    );
+    let feed = spec.method("feed-info").unwrap();
+    assert!(feed.sites.is_empty() && feed.built);
+    let yuanbao = spec.method("yuanbao").unwrap();
+    assert_eq!(yuanbao.sites, ["yuanbao.tencent.com"]);
+    let outputs: Vec<&str> = yuanbao
+        .capabilities
+        .fetch
+        .as_ref()
+        .unwrap()
+        .outputs
+        .iter()
+        .map(|o| o.as_str())
+        .collect();
+    assert_eq!(outputs, ["media:video"]);
+    assert_eq!(spec.built().count(), 2);
+}
+
+#[test]
+fn each_fetch_goes_to_its_method() {
+    let run = |args: &[&str]| {
+        let out = Command::new(BIN).args(args).env_clear().output().unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
+        (out.status.code(), json)
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_str().unwrap();
+    // 没有元宝的登录：yuanbao 不发请求就回 login-required
+    let (code, out) = run(&[
+        "fetch",
+        "https://weixin.qq.com/sph/AbC123",
+        "--out",
+        dir,
+        "--method",
+        "yuanbao",
+    ]);
+    assert_eq!(
+        (code, out["error"]["code"].as_str()),
+        (Some(1), Some("login-required"))
+    );
+    // 别的链接、没做的方法、不分方法的调用
+    let (code, out) = run(&[
+        "fetch",
+        "https://example.com/x",
+        "--out",
+        dir,
+        "--method",
+        "feed-info",
+    ]);
+    assert_eq!(
+        (code, out["error"]["code"].as_str()),
+        (Some(1), Some("unsupported-input"))
+    );
+    for method in ["iphone", "userscript"] {
+        let (code, out) = run(&[
+            "fetch",
+            "https://weixin.qq.com/sph/AbC123",
+            "--out",
+            dir,
+            "--method",
+            method,
+        ]);
+        assert_eq!(
+            (code, out["error"]["code"].as_str()),
+            (Some(1), Some("invalid-args")),
+            "{method}"
+        );
+    }
+    let (code, _) = run(&["fetch", "https://weixin.qq.com/sph/AbC123", "--out", dir]);
+    assert_eq!(code, Some(2));
 }

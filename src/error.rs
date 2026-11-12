@@ -28,12 +28,31 @@ pub enum FetchError {
     Network(String),
     #[error("{0}")]
     Internal(String),
+    /// 平台回了，但不是能用的回答：带着回答的开头，宿主记进失败日志。
+    #[error("{error}")]
+    Answered {
+        error: Box<FetchError>,
+        answer: String,
+    },
 }
 
+/// 留给失败日志的回答开头最多多少字节。
+const ANSWER_BYTES: usize = 4096;
+
 impl FetchError {
+    /// 带上平台回答的开头。
+    pub fn answered(self, raw: &[u8]) -> FetchError {
+        let end = raw.len().min(ANSWER_BYTES);
+        FetchError::Answered {
+            error: Box::new(self),
+            answer: String::from_utf8_lossy(&raw[..end]).into_owned(),
+        }
+    }
+
     pub fn into_failure(self) -> CallFailure {
         let message = self.to_string();
         match self {
+            FetchError::Answered { error, answer } => error.into_failure().with_detail(&answer),
             FetchError::UnsupportedInput(_) => {
                 CallFailure::new(ErrorCode::UnsupportedInput, message)
             }
