@@ -1,4 +1,4 @@
-# 微信视频号获取插件（usuyo 插件协议 v1）。设计见 usuyo 仓库 docs/research/15-fetch-design-xhs-sph-bili.md §3。
+# 微信视频号获取插件（usuyo 插件协议 v1）。设计见 usuyo 仓库 docs/platforms/wechat-channels.md §3。
 protocol: 1
 id: usuyo-fetch/wechat-channels
 kind: fetch
