@@ -259,15 +259,50 @@ fn thin_anonymous_answer_still_stores_author_and_cover() {
     }
     .start();
     let out = w.fetch(None, None).unwrap();
-    assert_eq!(out.missing, [OutputKind::Text, OutputKind::Video]);
-    assert!(
-        out.missing_reason
-            .as_deref()
-            .unwrap()
-            .contains("分享页没有给出描述")
-    );
+    // 没有描述就没有文字，不算缺；视频有、想要、没交来，算缺
+    assert_eq!(out.completeness, Completeness::Partial);
+    assert_eq!(out.missing, [OutputKind::Video]);
+    assert_eq!(out.missing_reason.as_deref(), Some(NO_LOGIN_REASON));
+    assert!(out.text.is_none());
     assert_eq!(out.images.len(), 1);
     assert!(out.author.is_some());
+}
+
+#[test]
+fn a_part_the_post_never_had_is_not_missing() {
+    // 没有描述：要了文字也是 full，没有原因
+    let thin = Setup {
+        anonymous: Arc::new(|r| {
+            Reply::json(200, fixture("feed-anonymous-thin.json", &media_base(r)))
+        }),
+        ..Setup::default()
+    }
+    .start();
+    let out = thin
+        .fetch(Some(&[OutputKind::Text, OutputKind::Images]), None)
+        .unwrap();
+    assert_eq!(out.completeness, Completeness::Full);
+    assert!(out.missing.is_empty() && out.missing_reason.is_none());
+    assert!(out.text.is_none());
+    assert_eq!(out.images.len(), 1);
+
+    // 没有封面地址：要了图片也不算缺，也不去下载
+    let bare = Setup {
+        anonymous: Arc::new(|r| {
+            Reply::json(
+                200,
+                fixture("feed-anonymous-thin.json", &media_base(r))
+                    .replace(&format!("{}/cover.jpg", media_base(r)), ""),
+            )
+        }),
+        ..Setup::default()
+    }
+    .start();
+    let out = bare
+        .fetch(Some(&[OutputKind::Text, OutputKind::Images]), None)
+        .unwrap();
+    assert_eq!(out.completeness, Completeness::Full);
+    assert!(out.missing.is_empty() && out.images.is_empty());
 }
 
 #[test]

@@ -76,8 +76,8 @@ pub fn fetch(
             .clone()
             .or_else(|| token_fields.and_then(|t| f(t).clone()))
     };
-    let description = pick(|f| &f.description);
-    let cover_url = pick(|f| &f.cover_url);
+    let description = pick(|f| &f.description).filter(|d| !d.trim().is_empty());
+    let cover_url = pick(|f| &f.cover_url).filter(|u| !u.trim().is_empty());
     let author = pick(|f| &f.author);
 
     let mut output = FetchOutput {
@@ -114,9 +114,6 @@ pub fn fetch(
     if wanted.contains(&OutputKind::Text) {
         output.text = description.clone();
         output.text_format = output.text.as_ref().map(|_| TextFormat::Plain);
-        if output.text.is_none() {
-            reasons.push("分享页没有给出描述".into());
-        }
     }
     if wanted.contains(&OutputKind::Meta) {
         output.author = author.clone().map(|name| Author {
@@ -125,20 +122,19 @@ pub fn fetch(
             url: None,
         });
     }
-    if wanted.contains(&OutputKind::Images) {
-        match &cover_url {
-            None => reasons.push("分享页没有给出封面".into()),
-            Some(url) => match download::cover(cfg, url) {
-                Ok((bytes, ext)) => {
-                    let name = format!("images/cover.{ext}");
-                    fs::create_dir_all(out.join("images"))
-                        .map_err(|e| FetchError::Internal(format!("create images/: {e}")))?;
-                    fs::write(out.join(&name), bytes)
-                        .map_err(|e| FetchError::Internal(format!("write {name}: {e}")))?;
-                    output.images.push(rel(&name)?);
-                }
-                Err(why) => reasons.push(why),
-            },
+    if wanted.contains(&OutputKind::Images)
+        && let Some(url) = &cover_url
+    {
+        match download::cover(cfg, url) {
+            Ok((bytes, ext)) => {
+                let name = format!("images/cover.{ext}");
+                fs::create_dir_all(out.join("images"))
+                    .map_err(|e| FetchError::Internal(format!("create images/: {e}")))?;
+                fs::write(out.join(&name), bytes)
+                    .map_err(|e| FetchError::Internal(format!("write {name}: {e}")))?;
+                output.images.push(rel(&name)?);
+            }
+            Err(why) => reasons.push(why),
         }
     }
     if let Some((_, v)) = &video {
@@ -176,9 +172,21 @@ pub fn fetch(
             .map_err(|e| FetchError::Internal(format!("write feed.json: {e}")))?;
     }
 
-    // 缺的 = 想要的 − 实际拿到的，和宿主重算的一样（协议 §3.1）
+    // 缺的 = 这一条有、想要、又没交来的（协议 §3.7）。
+    // 这个平台的每一条都是视频，视频总是有的；没有描述就没有文字，没有封面地址就没有图片
+    let mut absent: BTreeSet<OutputKind> = BTreeSet::new();
+    if description.is_none() {
+        absent.insert(OutputKind::Text);
+    }
+    if cover_url.is_none() {
+        absent.insert(OutputKind::Images);
+    }
     let obtained = output.obtained();
-    output.missing = wanted.difference(&obtained).copied().collect();
+    output.missing = wanted
+        .iter()
+        .filter(|kind| !absent.contains(kind) && !obtained.contains(kind))
+        .copied()
+        .collect();
     output.completeness = if output.missing.is_empty() {
         Completeness::Full
     } else if obtained.is_disjoint(&wanted) {
