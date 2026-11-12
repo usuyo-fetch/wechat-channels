@@ -62,6 +62,11 @@ methods:
     login: required
     account: own-phone
     interaction: foreground
+    drives: iphone
+    capabilities:
+      list:
+        sources:
+          - {source: "wechat-channels:liked", title: 赞和收藏, action: favorite}
     risk:
       text: 微信协议 8.2.1.6 禁止用第三方软件读界面、自动操作；镜像没有处罚报告
       source: {label: "调研 06 §1.2", url: "https://github.com/usuyo/usuyo/blob/main/docs/research/06-platform-access-and-account-risk.md#12-视觉层的风险从哪里来"}
@@ -72,6 +77,11 @@ methods:
     login: required
     account: own-app
     interaction: foreground
+    drives: desktop-app
+    capabilities:
+      list:
+        sources:
+          - {source: "wechat-channels:liked", title: 赞和收藏, action: favorite}
   - id: android
     name: 安卓手机
     built: false
@@ -79,6 +89,11 @@ methods:
     login: required
     account: own-phone
     interaction: foreground
+    drives: android
+    capabilities:
+      list:
+        sources:
+          - {source: "wechat-channels:liked", title: 赞和收藏, action: favorite}
   - id: audio
     name: 录下口播
     built: false
@@ -86,6 +101,10 @@ methods:
     login: required
     account: own-phone
     interaction: foreground
+    # 录的是 iPhone 镜像或电脑微信播放时的声音（routes.md 第 4 节），两样都可能，不写 `drives`
+    capabilities:
+      fetch:
+        outputs: [media:audio]
 pacing:
   wechat-channels: {batch: true, interval: 30s, daily: 50}
 permissions:
