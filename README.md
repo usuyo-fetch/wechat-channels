@@ -55,4 +55,4 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-测试全部对着本机的假服务跑，不向腾讯的任何主机发请求。固定回答照 ParseHub 的解析和设计文档的描述写；匿名接口的请求体和回答里 feed id 的字段名没有实测过，集中在 `src/feed.rs` 的 `anonymous_request` 和 `feed_id` 两处。
+测试全部对着本机的假服务跑，不向腾讯的任何主机发请求。固定回答照 ParseHub 的解析和设计文档的描述写；不用账号的单条路线（匿名接口的请求和回答）在 2026-11-12 对着真实平台跑过，请求体写在 `src/feed.rs` 的 `anonymous_request`；带元宝登录的那一步没有对着真实平台跑过。

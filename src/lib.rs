@@ -90,28 +90,24 @@ impl Config {
     }
 }
 
-/// 这一条的身份。canonicalize 和 fetch 共用，只看匿名回答，不看元宝那一步：
-/// 否则同一条链接登没登录元宝会得到两个身份。
-///
-/// `contentId` 用分享页回答里的 feed id；回答里没有时用 `sph-<短码>`。
-/// 短码每次分享可能不同（设计 §3.2，推断），所以它只是退路。
-pub fn identity(code: &str, feed_id: Option<&str>) -> Identity {
+/// 这一条的身份：`contentId` 是 `sph-<短码>`。
+/// 分享页的回答里没有 feed id（2026-11-12 实测），`sceneInfo.dynamicExportId` 每次调用都不同，
+/// 所以只有短码能当身份；canonicalize 和 fetch 共用，登没登录元宝都一样。
+pub fn identity(code: &str) -> Identity {
     Identity::Platform {
         platform: PlatformId::try_from(PLATFORM).expect("constant platform id"),
-        content_id: feed_id.map_or_else(|| format!("sph-{code}"), str::to_owned),
+        content_id: format!("sph-{code}"),
         url: Some(link::share_url(code)),
     }
 }
 
-/// 认身份（协议 §3.5）：先离线取短码，再匿名调一次分享页的接口拿 feed id。
-/// 网络不通时回 `network`，宿主照协议 §3.1 先用链接本身建条目，之后再来。
-pub fn canonicalize(cfg: &Config, input: &str) -> Result<Canonicalized, FetchError> {
+/// 认身份（协议 §3.5）：只离线取短码，不发请求。
+pub fn canonicalize(_cfg: &Config, input: &str) -> Result<Canonicalized, FetchError> {
     let Some(code) = link::short_code(input) else {
         return Ok(Canonicalized::NoMatch);
     };
-    let feed = feed::anonymous(cfg, &code)?;
     Ok(Canonicalized::Match {
-        identity: identity(&code, feed.id.as_deref()),
+        identity: identity(&code),
         resolved_url: None,
     })
 }

@@ -81,11 +81,11 @@ pub fn fetch(
     let author = pick(|f| &f.author);
 
     let mut output = FetchOutput {
-        identity: Some(identity(&code, anon.id.as_deref())),
+        identity: Some(identity(&code)),
         kind: ItemKind::Video,
         title: None,
         author: None,
-        published_at: None,
+        published_at: published_at(&anon.fields, token_fields),
         text: None,
         text_format: None,
         html: None,
@@ -163,7 +163,6 @@ pub fn fetch(
         let meta = json!({
             "shareUrl": link::share_url(&code),
             "shortCode": code,
-            "feedId": anon.id,
             "exportId": video.as_ref().map(|(ex, _)| ex.export_id.as_str()),
             "author": author,
             "description": description,
@@ -197,6 +196,14 @@ pub fn fetch(
         output.missing_reason = Some(reasons.join("；"));
     }
     Ok(output)
+}
+
+/// 发布时间：匿名回答的 `createtime`，缺了用带 token 那次的。
+fn published_at(anon: &FeedFields, token: Option<&FeedFields>) -> Option<Rfc3339> {
+    let secs = anon.created_at.or_else(|| token?.created_at)?;
+    jiff::Timestamp::from_second(secs)
+        .ok()
+        .map(Rfc3339::from_timestamp)
 }
 
 fn rel(path: &str) -> Result<RelPath, FetchError> {

@@ -1,5 +1,5 @@
 //! canonicalize 和 fetch 对着本机的假服务跑：分享页接口和 CDN 一个服务，元宝一个服务。
-//! 固定回答照 ParseHub `wxchannels.py` 的解析和设计 §3.2 的描述写；匿名那一种的形状是推断。
+//! 固定回答照 ParseHub `wxchannels.py` 的解析写；匿名那一种的请求和回答形状 2026-11-12 对着真实平台实测过。
 
 mod common;
 
@@ -17,7 +17,7 @@ use usuyo_plugin::protocol::{
 };
 
 const LINK: &str = "https://weixin.qq.com/sph/AbC123";
-const FEED_ID: &str = "export/UzFfFixtureExportId0001";
+const EXPORT_ID: &str = "export/UzFfFixtureExportId0001";
 const SENTINEL: &str = "SENTINEL-c00kie-v4lue";
 
 type Handler = Arc<dyn Fn(&Request) -> Reply + Send + Sync>;
@@ -63,12 +63,10 @@ impl Setup {
             yuanbao,
         } = self;
         let channels = Server::start(move |r| match (r.method.as_str(), r.path()) {
-            ("POST", "/finder-preview/api/feed/get_feed_info")
-                if r.body.contains("generalToken") =>
-            {
-                token(r)
+            ("POST", "/finder-preview/api/feed/get_feed_info") if r.body.contains("shortUri") => {
+                anonymous(r)
             }
-            ("POST", "/finder-preview/api/feed/get_feed_info") => anonymous(r),
+            ("POST", "/finder-preview/api/feed/get_feed_info") => token(r),
             ("GET", "/cover.jpg") => Reply::bytes("image/jpeg", JPEG),
             ("GET", "/video.mp4") => video(r),
             _ => Reply::json(404, "{}"),
@@ -138,13 +136,13 @@ fn code(e: FetchError) -> ErrorCode {
 }
 
 #[test]
-fn canonicalize_uses_the_feed_id() {
+fn canonicalize_uses_the_short_code_and_makes_no_request() {
     let w = Setup::default().start();
     let got = canonicalize(&w.cfg, LINK).unwrap();
     assert_eq!(
         got,
         Canonicalized::Match {
-            identity: identity("AbC123", Some(FEED_ID)),
+            identity: identity("AbC123"),
             resolved_url: None,
         }
     );
@@ -161,59 +159,29 @@ fn canonicalize_uses_the_feed_id() {
         panic!()
     };
     assert_eq!(platform.as_str(), "wechat-channels");
-    assert_eq!(content_id, FEED_ID);
+    assert_eq!(content_id, "sph-AbC123");
     assert_eq!(url.as_deref(), Some(LINK));
-
-    // 匿名请求：带 shortUri，不带 cookie，只发给分享页的接口
-    let reqs = w.channels.requests();
-    assert_eq!(reqs.len(), 1);
-    assert!(
-        reqs[0].body.contains(r#""shortUri":"AbC123""#),
-        "{}",
-        reqs[0].body
-    );
-    assert!(reqs[0].header("cookie").is_none());
-    assert!(reqs[0].header("origin").is_some());
-    assert!(reqs[0].header("referer").is_some());
+    assert!(w.channels.requests().is_empty());
     assert!(w.yuanbao.requests().is_empty());
 }
 
 #[test]
-fn canonicalize_falls_back_to_the_short_code() {
-    let w = Setup {
-        anonymous: Arc::new(|r| {
-            Reply::json(200, fixture("feed-anonymous-thin.json", &media_base(r)))
-        }),
-        ..Setup::default()
-    }
-    .start();
-    let pages = "https://channels.weixin.qq.com/finder-preview/pages/sph?id=AbC123&scene=1";
-    let Canonicalized::Match { identity, .. } = canonicalize(&w.cfg, pages).unwrap() else {
-        panic!()
-    };
-    assert_eq!(
-        identity,
-        usuyo_fetch_wechat_channels::identity("AbC123", None)
-    );
-    let Identity::Platform { content_id, .. } = identity else {
-        panic!()
-    };
-    assert_eq!(content_id, "sph-AbC123");
-}
-
-#[test]
-fn canonicalize_offline_is_a_network_error() {
+fn anonymous_request_shape() {
     let w = Setup::default().start();
-    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let mut cfg = w.cfg.clone();
-    cfg.endpoints.channels =
-        url::Url::parse(&format!("http://{}", closed.local_addr().unwrap())).unwrap();
-    drop(closed);
-    // 宿主照协议 §3.1 拿链接本身建 web: 身份；插件自己不报 web 身份
-    assert_eq!(
-        code(canonicalize(&cfg, LINK).unwrap_err()),
-        ErrorCode::Network
-    );
+    w.fetch(None, None).unwrap();
+    // 匿名请求：照分享页的 body，不带 cookie，只发给分享页的接口
+    let reqs = w.channels.requests();
+    let req = reqs
+        .iter()
+        .find(|r| r.path() == "/finder-preview/api/feed/get_feed_info")
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_str(&req.body).unwrap();
+    assert_eq!(body["baseReq"]["generalToken"], "");
+    assert_eq!(body["shortUri"], "AbC123");
+    assert!(req.header("cookie").is_none());
+    assert!(req.header("origin").is_some());
+    assert!(req.header("referer").is_some());
+    assert!(w.yuanbao.requests().is_empty());
 }
 
 #[test]
@@ -230,7 +198,7 @@ fn canonicalize_table_from_testdata() {
             assert_eq!(
                 got,
                 Canonicalized::Match {
-                    identity: identity(code, Some(FEED_ID)),
+                    identity: identity(code),
                     resolved_url: None
                 },
                 "{input}"
@@ -253,7 +221,7 @@ fn canonicalize_table_from_testdata() {
 fn anonymous_fetch_is_partial() {
     let w = Setup::default().start();
     let out = w.fetch(None, None).unwrap();
-    assert_eq!(out.identity, Some(identity("AbC123", Some(FEED_ID))));
+    assert_eq!(out.identity, Some(identity("AbC123")));
     assert_eq!(out.completeness, Completeness::Partial);
     assert_eq!(out.missing, [OutputKind::Video]);
     assert_eq!(out.missing_reason.as_deref(), Some(NO_LOGIN_REASON));
@@ -264,6 +232,10 @@ fn anonymous_fetch_is_partial() {
             .starts_with("手冲咖啡：三段式注水")
     );
     assert_eq!(out.author.as_ref().unwrap().name, "咖啡日常");
+    assert_eq!(
+        out.published_at.as_ref().map(|t| t.as_str()),
+        Some("2026-05-29T09:44:48Z")
+    );
     assert_eq!(out.images.len(), 1);
     assert_eq!(
         std::fs::read(w.out.path().join(out.images[0].as_str())).unwrap(),
@@ -320,7 +292,7 @@ fn with_yuanbao_login_saves_the_video() {
     assert_eq!(out.evidence.access, Access::SessionApi);
     assert_eq!(out.evidence.site.as_deref(), Some("yuanbao.tencent.com"));
     // 身份只看匿名回答，登没登录都一样
-    assert_eq!(out.identity, Some(identity("AbC123", Some(FEED_ID))));
+    assert_eq!(out.identity, Some(identity("AbC123")));
 
     // 元宝的请求：带 cookie，body 是重建的分享链接
     let yb = w.yuanbao.requests();
@@ -333,10 +305,10 @@ fn with_yuanbao_login_saves_the_video() {
 
     // 带 token 的那次：body 照 ParseHub，Referer 是元宝给的 playable_url
     let ch = w.channels.requests();
-    let token_req = ch.iter().find(|r| r.body.contains("generalToken")).unwrap();
+    let token_req = ch.iter().find(|r| r.body.contains("exportId")).unwrap();
     let body: serde_json::Value = serde_json::from_str(&token_req.body).unwrap();
     assert_eq!(body["baseReq"]["generalToken"], "FIXTURE-TEMP-TOKEN");
-    assert_eq!(body["exportId"], FEED_ID);
+    assert_eq!(body["exportId"], EXPORT_ID);
     assert!(
         token_req
             .header("referer")
@@ -379,12 +351,12 @@ fn output_dir_contents() {
     let meta: serde_json::Value =
         serde_json::from_slice(&std::fs::read(w.out.path().join("meta.json")).unwrap()).unwrap();
     assert_eq!(meta["shortCode"], "AbC123");
-    assert_eq!(meta["feedId"], FEED_ID);
-    assert_eq!(meta["exportId"], FEED_ID);
+    assert!(meta.get("feedId").is_none());
+    assert_eq!(meta["exportId"], EXPORT_ID);
     assert_eq!(meta["shareUrl"], LINK);
     // feed.json 是匿名回答的原样
     let raw = std::fs::read_to_string(w.out.path().join("feed.json")).unwrap();
-    assert!(raw.contains("likeCount"));
+    assert!(raw.contains("likeCountFmt"));
 
     // 信封照协议的类型能读回来
     let json = serde_json::to_value(Envelope::Ok(&out)).unwrap();
@@ -559,9 +531,7 @@ fn malformed_answers_are_upstream_changed() {
         r#"{"errCode":0,"data":{}}"#.to_owned(),
         r#"{"errCode":0,"data":{"feedInfo":{}}}"#.to_owned(),
         r#"{"errCode":0,"data":{"feedInfo":{"description":["x"]}}}"#.to_owned(),
-        r#"{"errCode":0,"data":{"feedInfo":{"description":"x","exportId":42}}}"#.to_owned(),
-        r#"{"errCode":0,"data":{"feedInfo":{"description":"x","exportId":"has space"}}}"#
-            .to_owned(),
+        r#"{"errCode":0,"data":{"feedInfo":{"description":"x","createtime":"soon"}}}"#.to_owned(),
         r#"{"errCode":-1,"errMsg":"unknown","data":{}}"#.to_owned(),
     ];
     for body in bodies {
@@ -576,13 +546,29 @@ fn malformed_answers_are_upstream_changed() {
             ErrorCode::UpstreamChanged,
             "{body}"
         );
-        assert_eq!(
-            code(canonicalize(&w.cfg, LINK).unwrap_err()),
-            ErrorCode::UpstreamChanged,
-            "{body}"
-        );
         assert!(w.files().is_empty(), "{body}");
     }
+}
+
+#[test]
+fn error_shape_is_upstream_changed_with_the_message() {
+    let w = Setup {
+        anonymous: Arc::new(|_| {
+            Reply::json(
+                200,
+                r#"{"error":{"name":"ServerError","message":"请求异常"}}"#,
+            )
+        }),
+        ..Setup::default()
+    }
+    .start();
+    let failure = w.fetch(None, None).unwrap_err().into_failure();
+    assert_eq!(failure.code, ErrorCode::UpstreamChanged);
+    let text = serde_json::to_string(&failure).unwrap();
+    assert!(
+        text.contains("ServerError") && text.contains("请求异常"),
+        "{text}"
+    );
 }
 
 #[test]

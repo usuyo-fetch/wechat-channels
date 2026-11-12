@@ -1,12 +1,23 @@
 {
-  "errCode": 0,
-  "errMsg": "",
   "data": {
+    "authorInfo": {
+      "nickname": "咖啡日常",
+      "headImgUrl": "{media}/head.jpg",
+      "authIconUrl": ""
+    },
     "feedInfo": {
+      "picInfo": [],
+      "isHardAd": false,
       "coverUrl": "{media}/cover.jpg"
     },
-    "authorInfo": {
-      "nickname": "咖啡日常"
+    "errMsg": {
+      "type": 0
+    },
+    "sceneInfo": {
+      "dynamicExportId": "export/UzFfFixtureDynamic0002",
+      "requestScene": 0
     }
-  }
+  },
+  "errCode": 0,
+  "errMsg": ""
 }
