@@ -100,8 +100,9 @@ methods:
     access: vision-ui
     login: required
     account: own-phone
+    drives: iphone
     interaction: foreground
-    # 录的是 iPhone 镜像或电脑微信播放时的声音（routes.md 第 4 节），两样都可能，不写 `drives`
+    # 录的是 iPhone 镜像播放时的声音（routes.md 第 4 节先写的那一样）；录电脑微信的要另写一种 `own-app` 的方法
     capabilities:
       fetch:
         outputs: [media:audio]
